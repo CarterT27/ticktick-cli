@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "A fast, snappy TickTick CLI tool"
 license = "MIT"
+default-run = "tt"
+
+[[bin]]
+name = "tt"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

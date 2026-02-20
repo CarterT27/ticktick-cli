@@ -1,4 +1,4 @@
-use crate::models::{Project, Task, TaskStatus};
+use crate::models::{Project, Task};
 use atty::Stream;
 use std::io;
 
@@ -19,20 +19,18 @@ impl Tabular for Task {
         vec![
             "ID".to_string(),
             "Title".to_string(),
-            "Status".to_string(),
             "Priority".to_string(),
             "Due".to_string(),
         ]
     }
 
     fn rows(&self) -> Vec<String> {
-        let status = match self.status {
-            Some(TaskStatus::Completed) => "✓",
-            _ => "○",
-        };
         let priority = match self.priority.unwrap_or(0) {
             0 => "".to_string(),
-            p => "★".repeat(p as usize),
+            1 => "Low".to_string(),
+            3 => "Medium".to_string(),
+            5 => "High".to_string(),
+            p => p.to_string(),
         };
         let due = self
             .due_date
@@ -41,13 +39,7 @@ impl Tabular for Task {
             .unwrap_or_default();
         let id = self.id.clone().unwrap_or_default();
 
-        vec![
-            format!("{}...", &id[..8.min(id.len())]),
-            self.title.clone(),
-            status.to_string(),
-            priority,
-            due,
-        ]
+        vec![id, self.title.clone(), priority, due]
     }
 }
 

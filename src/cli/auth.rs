@@ -11,8 +11,11 @@ use url::Url;
 
 #[derive(Subcommand)]
 pub enum AuthCommands {
+    #[command(alias = "signin")]
     Login,
+    #[command(alias = "signout")]
     Logout,
+    #[command(alias = "whoami")]
     Status,
 }
 
