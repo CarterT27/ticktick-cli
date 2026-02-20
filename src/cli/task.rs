@@ -4,7 +4,7 @@ use crate::models::{Task, TaskStatus};
 use crate::output::{print_tasks, OutputFormat};
 use anyhow::{anyhow, Result};
 use atty::Stream;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
 use clap::{Args, Subcommand};
 use std::io::{self, Read};
 
@@ -59,7 +59,7 @@ fn parse_when_token(token: &str) -> Option<TaskWhenFilter> {
     }
 }
 
-fn parse_shorthand(raw: &str) -> ShorthandFilters {
+fn parse_shorthand_with_when(raw: &str, parse_when: bool) -> ShorthandFilters {
     let mut parsed = ShorthandFilters::default();
     let tokens: Vec<&str> = raw.split_whitespace().collect();
     let mut i = 0;
@@ -88,19 +88,21 @@ fn parse_shorthand(raw: &str) -> ShorthandFilters {
             }
         }
 
-        if token.eq_ignore_ascii_case("this")
-            && i + 1 < tokens.len()
-            && tokens[i + 1].eq_ignore_ascii_case("week")
-        {
-            parsed.when = Some(TaskWhenFilter::ThisWeek);
-            i += 2;
-            continue;
-        }
+        if parse_when {
+            if token.eq_ignore_ascii_case("this")
+                && i + 1 < tokens.len()
+                && tokens[i + 1].eq_ignore_ascii_case("week")
+            {
+                parsed.when = Some(TaskWhenFilter::ThisWeek);
+                i += 2;
+                continue;
+            }
 
-        if let Some(when) = parse_when_token(token) {
-            parsed.when = Some(when);
-            i += 1;
-            continue;
+            if let Some(when) = parse_when_token(token) {
+                parsed.when = Some(when);
+                i += 1;
+                continue;
+            }
         }
 
         parsed.terms.push(token.to_string());
@@ -108,6 +110,249 @@ fn parse_shorthand(raw: &str) -> ShorthandFilters {
     }
 
     parsed
+}
+
+fn parse_shorthand(raw: &str) -> ShorthandFilters {
+    parse_shorthand_with_when(raw, true)
+}
+
+fn parse_task_add_shorthand(raw: &str) -> ShorthandFilters {
+    parse_shorthand_with_when(raw, false)
+}
+
+fn normalize_date_token(token: &str) -> String {
+    token
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '/' && ch != '-')
+        .to_ascii_lowercase()
+}
+
+fn infer_year_for_month_day(month: u32, day: u32, today: NaiveDate) -> Option<NaiveDate> {
+    let this_year = NaiveDate::from_ymd_opt(today.year(), month, day)?;
+    if this_year >= today {
+        Some(this_year)
+    } else {
+        NaiveDate::from_ymd_opt(today.year() + 1, month, day)
+    }
+}
+
+fn parse_year_token(token: &str) -> Option<i32> {
+    let year = token.parse::<i32>().ok()?;
+    match token.len() {
+        2 => Some(2000 + year),
+        4 => Some(year),
+        _ => None,
+    }
+}
+
+fn parse_day_token(token: &str) -> Option<u32> {
+    let day_text = token
+        .strip_suffix("st")
+        .or_else(|| token.strip_suffix("nd"))
+        .or_else(|| token.strip_suffix("rd"))
+        .or_else(|| token.strip_suffix("th"))
+        .unwrap_or(token);
+
+    let day = day_text.parse::<u32>().ok()?;
+    if (1..=31).contains(&day) {
+        Some(day)
+    } else {
+        None
+    }
+}
+
+fn parse_month_token(token: &str) -> Option<u32> {
+    match token {
+        "jan" | "january" => Some(1),
+        "feb" | "february" => Some(2),
+        "mar" | "march" => Some(3),
+        "apr" | "april" => Some(4),
+        "may" => Some(5),
+        "jun" | "june" => Some(6),
+        "jul" | "july" => Some(7),
+        "aug" | "august" => Some(8),
+        "sep" | "sept" | "september" => Some(9),
+        "oct" | "october" => Some(10),
+        "nov" | "november" => Some(11),
+        "dec" | "december" => Some(12),
+        _ => None,
+    }
+}
+
+fn parse_weekday_token(token: &str) -> Option<Weekday> {
+    match token {
+        "mon" | "monday" => Some(Weekday::Mon),
+        "tue" | "tues" | "tuesday" => Some(Weekday::Tue),
+        "wed" | "wednesday" => Some(Weekday::Wed),
+        "thu" | "thurs" | "thursday" => Some(Weekday::Thu),
+        "fri" | "friday" => Some(Weekday::Fri),
+        "sat" | "saturday" => Some(Weekday::Sat),
+        "sun" | "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+fn next_or_same_weekday(today: NaiveDate, target: Weekday) -> NaiveDate {
+    let today_idx = today.weekday().num_days_from_monday() as i64;
+    let target_idx = target.num_days_from_monday() as i64;
+    let offset = (target_idx - today_idx + 7) % 7;
+    today + Duration::days(offset)
+}
+
+fn start_of_next_week(today: NaiveDate) -> NaiveDate {
+    let start_of_this_week = today - Duration::days(today.weekday().num_days_from_monday().into());
+    start_of_this_week + Duration::days(7)
+}
+
+fn parse_numeric_date_token(token: &str, today: NaiveDate) -> Option<NaiveDate> {
+    if let Ok(date) = NaiveDate::parse_from_str(token, "%Y-%m-%d") {
+        return Some(date);
+    }
+
+    let separator = if token.contains('/') {
+        Some('/')
+    } else if token.matches('-').count() == 2 {
+        Some('-')
+    } else {
+        None
+    }?;
+
+    let parts: Vec<&str> = token.split(separator).collect();
+    if parts.len() == 2 {
+        let month = parts[0].parse::<u32>().ok()?;
+        let day = parts[1].parse::<u32>().ok()?;
+        return infer_year_for_month_day(month, day, today);
+    }
+
+    if parts.len() == 3 {
+        let month = parts[0].parse::<u32>().ok()?;
+        let day = parts[1].parse::<u32>().ok()?;
+        let year = parse_year_token(parts[2])?;
+        return NaiveDate::from_ymd_opt(year, month, day);
+    }
+
+    None
+}
+
+fn parse_month_day_sequence(
+    tokens: &[&str],
+    index: usize,
+    today: NaiveDate,
+) -> Option<(usize, NaiveDate)> {
+    let month = parse_month_token(&normalize_date_token(tokens.get(index)?))?;
+    let second = normalize_date_token(tokens.get(index + 1)?);
+
+    // Support "jan 2029" / "january 2029" by mapping to the first of that month.
+    if let Some(year) = parse_year_token(&second) {
+        let date = NaiveDate::from_ymd_opt(year, month, 1)?;
+        return Some((2, date));
+    }
+
+    let day = parse_day_token(&second)?;
+
+    if let Some(year_token) = tokens.get(index + 2) {
+        let normalized_year = normalize_date_token(year_token);
+        if let Some(year) = parse_year_token(&normalized_year) {
+            let date = NaiveDate::from_ymd_opt(year, month, day)?;
+            return Some((3, date));
+        }
+    }
+
+    let date = infer_year_for_month_day(month, day, today)?;
+    Some((2, date))
+}
+
+fn extract_due_date_from_input(raw: &str, today: NaiveDate) -> (String, Option<NaiveDate>) {
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    if tokens.is_empty() {
+        return (String::new(), None);
+    }
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.starts_with('#') || token.starts_with('~') || token.starts_with('!') {
+            continue;
+        }
+
+        let normalized = normalize_date_token(token);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if normalized == "next"
+            && index + 1 < tokens.len()
+            && normalize_date_token(tokens[index + 1]) == "week"
+        {
+            let date = start_of_next_week(today);
+            let title = tokens
+                .iter()
+                .enumerate()
+                .filter_map(|(i, value)| {
+                    if i == index || i == index + 1 {
+                        None
+                    } else {
+                        Some(*value)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            return (title, Some(date));
+        }
+
+        if let Some((consumed, date)) = parse_month_day_sequence(&tokens, index, today) {
+            let title = tokens
+                .iter()
+                .enumerate()
+                .filter_map(|(i, value)| {
+                    if i >= index && i < index + consumed {
+                        None
+                    } else {
+                        Some(*value)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            return (title, Some(date));
+        }
+
+        if let Some(date) = parse_numeric_date_token(&normalized, today) {
+            let title = tokens
+                .iter()
+                .enumerate()
+                .filter_map(|(i, value)| if i == index { None } else { Some(*value) })
+                .collect::<Vec<_>>()
+                .join(" ");
+            return (title, Some(date));
+        }
+
+        let relative_date = match normalized.as_str() {
+            "today" => Some(today),
+            "tomorrow" => Some(today + Duration::days(1)),
+            _ => {
+                parse_weekday_token(&normalized).map(|weekday| next_or_same_weekday(today, weekday))
+            }
+        };
+
+        if let Some(date) = relative_date {
+            let title = tokens
+                .iter()
+                .enumerate()
+                .filter_map(|(i, value)| if i == index { None } else { Some(*value) })
+                .collect::<Vec<_>>()
+                .join(" ");
+            return (title, Some(date));
+        }
+    }
+
+    (raw.trim().to_string(), None)
+}
+
+fn format_ticktick_due_date(date: NaiveDate) -> Option<String> {
+    let local_midnight = date.and_hms_opt(0, 0, 0)?;
+    let local_dt = Local
+        .from_local_datetime(&local_midnight)
+        .earliest()
+        .or_else(|| Local.from_local_datetime(&local_midnight).latest())?;
+    let utc_dt = local_dt.with_timezone(&Utc);
+    Some(utc_dt.format("%Y-%m-%dT%H:%M:%S%.3f+0000").to_string())
 }
 
 fn merge_tags(existing: &mut Vec<String>, extras: Vec<String>) {
@@ -366,13 +611,29 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
         args.title.join(" ")
     };
 
-    let shorthand = parse_shorthand(&raw_input);
+    let today = Local::now().date_naive();
+    let (input_without_due_date, inferred_due_date) =
+        extract_due_date_from_input(&raw_input, today);
+    let shorthand = parse_task_add_shorthand(&input_without_due_date);
 
     if args.priority.is_none() {
         args.priority = shorthand.priority;
     }
     if args.list.is_none() {
         args.list = shorthand.list;
+    }
+    if args.due_date.is_none() {
+        if let Some(date) = inferred_due_date {
+            let formatted = format_ticktick_due_date(date)
+                .ok_or_else(|| anyhow!("Failed to format inferred due date '{}'", date))?;
+            args.due_date = Some(formatted.clone());
+            if args.start_date.is_none() {
+                args.start_date = Some(formatted);
+            }
+            if args.all_day.is_none() {
+                args.all_day = Some(true);
+            }
+        }
     }
     merge_tags(&mut args.tags, shorthand.tags);
 
@@ -761,6 +1022,93 @@ mod tests {
         let parsed = parse_shorthand("plan this week");
         assert_eq!(parsed.when, Some(TaskWhenFilter::ThisWeek));
         assert_eq!(parsed.terms, vec!["plan".to_string()]);
+    }
+
+    #[test]
+    fn add_shorthand_keeps_when_terms_for_title() {
+        let parsed = parse_task_add_shorthand("plan today");
+        assert_eq!(parsed.when, None);
+        assert_eq!(parsed.terms, vec!["plan".to_string(), "today".to_string()]);
+    }
+
+    #[test]
+    fn extracts_due_date_today_and_cleans_title() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("finish report today", today);
+        assert_eq!(title, "finish report");
+        assert_eq!(date, Some(today));
+    }
+
+    #[test]
+    fn extracts_due_date_next_week_phrase() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("plan roadmap next week", today);
+        assert_eq!(title, "plan roadmap");
+        assert_eq!(date, Some(NaiveDate::from_ymd_opt(2026, 2, 23).unwrap()));
+    }
+
+    #[test]
+    fn extracts_due_date_weekday() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 18).unwrap();
+        let (title, date) = extract_due_date_from_input("ship draft friday", today);
+        assert_eq!(title, "ship draft");
+        assert_eq!(date, Some(NaiveDate::from_ymd_opt(2026, 2, 20).unwrap()));
+    }
+
+    #[test]
+    fn extracts_due_date_numeric_month_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("pay rent 6/01", today);
+        assert_eq!(title, "pay rent");
+        assert_eq!(date, Some(NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()));
+    }
+
+    #[test]
+    fn extracts_due_date_text_month_day_year() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("renew passport feb 1 2027", today);
+        assert_eq!(title, "renew passport");
+        assert_eq!(date, Some(NaiveDate::from_ymd_opt(2027, 2, 1).unwrap()));
+    }
+
+    #[test]
+    fn keeps_hashtag_dates_as_tags() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("sync with team #friday", today);
+        assert_eq!(title, "sync with team #friday");
+        assert_eq!(date, None);
+    }
+
+    #[test]
+    fn extracts_due_date_text_month_year_short_name() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("plan launch jan 2029", today);
+        assert_eq!(title, "plan launch");
+        assert_eq!(date, Some(NaiveDate::from_ymd_opt(2029, 1, 1).unwrap()));
+    }
+
+    #[test]
+    fn extracts_due_date_text_month_year_full_name() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("plan launch january 2029", today);
+        assert_eq!(title, "plan launch");
+        assert_eq!(date, Some(NaiveDate::from_ymd_opt(2029, 1, 1).unwrap()));
+    }
+
+    #[test]
+    fn extracts_due_date_text_month_day_year_capitalized() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let (title, date) = extract_due_date_from_input("book trip January 3 2028", today);
+        assert_eq!(title, "book trip");
+        assert_eq!(date, Some(NaiveDate::from_ymd_opt(2028, 1, 3).unwrap()));
+    }
+
+    #[test]
+    fn formats_inferred_due_date_for_ticktick_api() {
+        let date = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+        let value = format_ticktick_due_date(date).unwrap();
+        assert!(DateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S%.f%z").is_ok());
+        assert!(value.ends_with("+0000"));
     }
 
     #[test]
