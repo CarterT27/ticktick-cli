@@ -6,11 +6,15 @@ use clap::{Args, Subcommand};
 
 #[derive(Subcommand)]
 pub enum ProjectCommands {
+    #[command(alias = "new")]
     Add(ProjectAddArgs),
+    #[command(alias = "ls")]
     List(ProjectListArgs),
     Get(ProjectGetArgs),
     Data(ProjectDataArgs),
+    #[command(alias = "edit")]
     Update(ProjectUpdateArgs),
+    #[command(aliases = ["rm", "del"])]
     Delete(ProjectDeleteArgs),
 }
 

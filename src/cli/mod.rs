@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "tt")]
+#[command(bin_name = "tt")]
 #[command(about = "A fast, snappy TickTick CLI tool", long_about = None)]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
@@ -23,6 +24,7 @@ enum Commands {
         #[command(subcommand)]
         subcommand: auth::AuthCommands,
     },
+    #[command(alias = "tasks")]
     Task {
         #[command(subcommand)]
         subcommand: task::TaskCommands,
@@ -31,6 +33,24 @@ enum Commands {
         #[command(subcommand)]
         subcommand: project::ProjectCommands,
     },
+    #[command(name = "ls", aliases = ["list"])]
+    Ls(task::TaskListArgs),
+    #[command(alias = "new")]
+    Add(task::TaskAddArgs),
+    #[command(name = "edit", alias = "update")]
+    Edit(task::TaskUpdateArgs),
+    #[command(name = "done", alias = "complete")]
+    Done(task::TaskCompleteArgs),
+    #[command(name = "rm", aliases = ["delete", "del"])]
+    Rm(task::TaskDeleteArgs),
+    #[command(name = "projects", alias = "lists")]
+    Projects(project::ProjectListArgs),
+    #[command(name = "login")]
+    Login,
+    #[command(name = "logout")]
+    Logout,
+    #[command(name = "status")]
+    Status,
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -57,5 +77,14 @@ pub async fn run() -> anyhow::Result<()> {
             project::ProjectCommands::Update(args) => project_update(args).await,
             project::ProjectCommands::Delete(args) => project_delete(args).await,
         },
+        Commands::Ls(args) => task_list(args).await,
+        Commands::Add(args) => task_add(args).await,
+        Commands::Edit(args) => task_update(args).await,
+        Commands::Done(args) => task_complete(args).await,
+        Commands::Rm(args) => task_delete(args).await,
+        Commands::Projects(args) => project_list(args).await,
+        Commands::Login => login().await,
+        Commands::Logout => logout().await,
+        Commands::Status => status().await,
     }
 }

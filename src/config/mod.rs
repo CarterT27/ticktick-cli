@@ -15,7 +15,6 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    config_dir: PathBuf,
     config_file: PathBuf,
 }
 
@@ -32,10 +31,7 @@ impl AppConfig {
 
         let config_file = config_dir.join("config.toml");
 
-        Ok(AppConfig {
-            config_dir,
-            config_file,
-        })
+        Ok(AppConfig { config_file })
     }
 
     pub fn load(&self) -> Result<Option<Config>> {
@@ -64,10 +60,6 @@ impl AppConfig {
             fs::remove_file(&self.config_file).context("Failed to remove config file")?;
         }
         Ok(())
-    }
-
-    pub fn config_dir(&self) -> &PathBuf {
-        &self.config_dir
     }
 
     pub fn config_file_path(&self) -> &PathBuf {
