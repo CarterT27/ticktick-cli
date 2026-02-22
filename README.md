@@ -14,10 +14,10 @@ This project is actively evolving. Expect commands and behavior to improve over 
 ## Prerequisites
 
 - Rust toolchain (`rustc` + `cargo`) installed.
-- A TickTick OAuth app/client so you can provide:
-  - `TICKTICK_CLIENT_ID`
-  - `TICKTICK_CLIENT_SECRET`
-- Optional:
+- OAuth configuration via one of these modes:
+  - Bring-your-own TickTick OAuth app (`TICKTICK_CLIENT_ID` + `TICKTICK_CLIENT_SECRET`)
+  - Shared auth broker (`TICKTICK_CLIENT_ID` + `TICKTICK_OAUTH_BROKER_URL`)
+- Optional redirect override:
   - `TICKTICK_REDIRECT_URI` (defaults to `http://localhost:8080/callback`)
 
 ## Setup TickTick OAuth (first-time)
@@ -29,6 +29,14 @@ Use the official TickTick Open API docs:
 
 From there, create an app and copy your `client_id` and `client_secret`.
 
+If you use a shared auth broker, users only need your shared `client_id` and broker URL.
+
+## Optional: Cloudflare auth broker
+
+For distribution where users should not manage `TICKTICK_CLIENT_SECRET`, deploy the lightweight broker in `cloudflare-auth-broker/`.
+
+See `cloudflare-auth-broker/README.md` for setup and deploy steps.
+
 ## Install
 
 1. Clone the repo:
@@ -38,11 +46,24 @@ git clone <repo-url>
 cd ticktick-cli
 ```
 
-2. Export required environment variables:
+2. Export environment variables.
+
+BYO credentials mode:
 
 ```bash
 export TICKTICK_CLIENT_ID="<your-client-id>"
 export TICKTICK_CLIENT_SECRET="<your-client-secret>"
+# optional (default is shown)
+export TICKTICK_REDIRECT_URI="http://localhost:8080/callback"
+```
+
+Shared broker mode (no local client secret required):
+
+```bash
+export TICKTICK_CLIENT_ID="<shared-client-id>"
+export TICKTICK_OAUTH_BROKER_URL="https://<your-worker-domain>"
+# optional broker header key if your broker enforces one
+export TICKTICK_OAUTH_BROKER_KEY="<broker-key>"
 # optional (default is shown)
 export TICKTICK_REDIRECT_URI="http://localhost:8080/callback"
 ```

@@ -9,6 +9,8 @@ use std::time::Duration;
 use tiny_http::{Response, Server};
 use url::Url;
 
+const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
+
 #[derive(Subcommand)]
 pub enum AuthCommands {
     #[command(alias = "signin")]
@@ -26,12 +28,33 @@ pub async fn login() -> Result<()> {
 
     let client_id =
         std::env::var("TICKTICK_CLIENT_ID").map_err(|_| anyhow!("Missing TICKTICK_CLIENT_ID"))?;
-    let client_secret = std::env::var("TICKTICK_CLIENT_SECRET")
-        .map_err(|_| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?;
-    let redirect_uri = std::env::var("TICKTICK_REDIRECT_URI")
-        .unwrap_or_else(|_| "http://localhost:8080/callback".to_string());
+    let redirect_uri =
+        std::env::var("TICKTICK_REDIRECT_URI").unwrap_or_else(|_| DEFAULT_REDIRECT_URI.to_string());
 
-    let oauth = TickTickOAuth::new(client_id, client_secret, redirect_uri)?;
+    let broker_url = std::env::var("TICKTICK_OAUTH_BROKER_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let broker_api_key = std::env::var("TICKTICK_OAUTH_BROKER_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let client_secret = if broker_url.is_none() {
+        Some(
+            std::env::var("TICKTICK_CLIENT_SECRET")
+                .map_err(|_| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?,
+        )
+    } else {
+        std::env::var("TICKTICK_CLIENT_SECRET").ok()
+    };
+
+    if broker_url.is_some() {
+        println!("Using OAuth broker for token exchange.");
+    }
+
+    let oauth = TickTickOAuth::new(client_id, client_secret, redirect_uri.clone())?;
     let (auth_url, pkce_verifier, csrf_token) = oauth.auth_url();
 
     println!("Opening browser for authorization...");
@@ -40,10 +63,24 @@ pub async fn login() -> Result<()> {
         println!("{}", auth_url);
     }
 
-    let code = wait_for_code(csrf_token)?;
-    let token = oauth
-        .exchange_code(AuthorizationCode::new(code), pkce_verifier)
-        .await?;
+    let code = wait_for_code(&redirect_uri, csrf_token)?;
+    let token = match broker_url {
+        Some(url) => {
+            TickTickOAuth::exchange_code_via_broker(
+                AuthorizationCode::new(code),
+                pkce_verifier,
+                redirect_uri,
+                &url,
+                broker_api_key.as_deref(),
+            )
+            .await?
+        }
+        None => {
+            oauth
+                .exchange_code(AuthorizationCode::new(code), pkce_verifier)
+                .await?
+        }
+    };
 
     let config = Config {
         access_token: token.access_token,
@@ -62,9 +99,19 @@ pub async fn login() -> Result<()> {
     Ok(())
 }
 
-fn wait_for_code(csrf_token: CsrfToken) -> Result<String> {
-    let server = Server::http("127.0.0.1:8080")
-        .map_err(|err| anyhow!("Failed to start local server: {}", err))?;
+fn wait_for_code(redirect_uri: &str, csrf_token: CsrfToken) -> Result<String> {
+    let callback_url = Url::parse(redirect_uri)
+        .map_err(|err| anyhow!("Invalid TICKTICK_REDIRECT_URI '{}': {}", redirect_uri, err))?;
+
+    let port = callback_url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("Redirect URI must include a valid port"))?;
+
+    let bind_addr = format!("127.0.0.1:{}", port);
+    let server =
+        Server::http(&bind_addr).map_err(|err| anyhow!("Failed to start local server: {}", err))?;
+
+    let expected_path = callback_url.path().to_string();
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
@@ -73,8 +120,10 @@ fn wait_for_code(csrf_token: CsrfToken) -> Result<String> {
             let parsed = Url::parse(&url).ok();
             let mut code: Option<String> = None;
             let mut state: Option<String> = None;
+            let mut path_matches = false;
 
             if let Some(parsed) = parsed {
+                path_matches = parsed.path() == expected_path;
                 for (key, value) in parsed.query_pairs() {
                     if key == "code" {
                         code = Some(value.to_string());
@@ -85,9 +134,17 @@ fn wait_for_code(csrf_token: CsrfToken) -> Result<String> {
                 }
             }
 
-            let body = "Authentication complete. You can close this window.";
+            let body = if path_matches {
+                "Authentication complete. You can close this window."
+            } else {
+                "Unexpected callback path. You can close this window and try again."
+            };
             let _ = request.respond(Response::from_string(body));
-            let _ = tx.send((code, state));
+            if path_matches {
+                let _ = tx.send((code, state));
+            } else {
+                let _ = tx.send((None, None));
+            }
         }
     });
 

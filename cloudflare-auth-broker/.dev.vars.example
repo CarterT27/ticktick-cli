@@ -1,0 +1,4 @@
+TICKTICK_CLIENT_ID=your_client_id
+TICKTICK_CLIENT_SECRET=your_client_secret
+# Optional
+# BROKER_API_KEY=your_local_test_key
