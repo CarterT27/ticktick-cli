@@ -28,6 +28,7 @@ Use the official TickTick Open API docs:
 - Developer Center (then click **Manage Apps**): https://developer.ticktick.com/
 
 From there, create an app and copy your `client_id` and `client_secret`.
+Also add your redirect URL in the TickTick Developer Center app settings (for example `http://localhost:8080/callback`), and make sure it matches `TICKTICK_REDIRECT_URI` if you set that variable.
 
 ## Install
 
