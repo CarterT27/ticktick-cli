@@ -1,11 +1,22 @@
 use crate::config::Config;
-use crate::models::{Project, ProjectData, Task};
+use crate::models::{Column, Project, ProjectData, Task};
 use anyhow::{anyhow, Context, Result};
 use reqwest::{header, Client, Response};
+use serde::Deserialize;
 use serde_json::json;
 
 const BASE_URL: &str = "https://api.ticktick.com/open/v1";
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InboxProjectData {
+    #[allow(dead_code)]
+    project: Option<Project>,
+    tasks: Option<Vec<Task>>,
+    #[allow(dead_code)]
+    columns: Option<Vec<Column>>,
+}
 
 #[derive(Debug, Clone)]
 pub struct TickTickClient {
@@ -78,6 +89,12 @@ impl TickTickClient {
         let response = self.request("GET", &endpoint, None).await?;
         let data: ProjectData = response.json().await.context("Failed to parse response")?;
         Ok(data)
+    }
+
+    pub async fn get_inbox_tasks(&self) -> Result<Vec<Task>> {
+        let response = self.request("GET", "/project/inbox/data", None).await?;
+        let data: InboxProjectData = response.json().await.context("Failed to parse response")?;
+        Ok(data.tasks.unwrap_or_default())
     }
 
     pub async fn create_project(&self, project: &Project) -> Result<Project> {
