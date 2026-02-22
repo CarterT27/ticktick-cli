@@ -1,0 +1,6 @@
+name = "ticktick-auth-broker"
+main = "build/index.js"
+compatibility_date = "2026-02-22"
+
+[build]
+command = "cargo install -q \"worker-build@^0.7\" && worker-build --release"

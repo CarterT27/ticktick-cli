@@ -1,6 +1,6 @@
 use super::bootstrap::{app_config, load_config};
 use crate::cache::CacheStore;
-use crate::config::auth::TickTickOAuth;
+use crate::config::auth::AuthSettings;
 use crate::config::Config;
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
@@ -9,8 +9,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tiny_http::{Response, Server};
 use url::{Host, Url};
-
-const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LocalCallbackConfig {
@@ -34,15 +32,13 @@ pub async fn login() -> Result<()> {
     println!("=========================");
     println!();
 
-    let client_id =
-        std::env::var("TICKTICK_CLIENT_ID").map_err(|_| anyhow!("Missing TICKTICK_CLIENT_ID"))?;
-    let client_secret = std::env::var("TICKTICK_CLIENT_SECRET")
-        .map_err(|_| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?;
-    let redirect_uri =
-        std::env::var("TICKTICK_REDIRECT_URI").unwrap_or_else(|_| DEFAULT_REDIRECT_URI.to_string());
-    let callback_config = LocalCallbackConfig::from_redirect_uri(&redirect_uri)?;
+    let settings = AuthSettings::from_env()?;
+    if settings.uses_broker() {
+        println!("Using OAuth broker for token exchange.");
+    }
 
-    let oauth = TickTickOAuth::new(client_id, client_secret, redirect_uri)?;
+    let callback_config = LocalCallbackConfig::from_redirect_uri(settings.redirect_uri())?;
+    let oauth = settings.oauth_client()?;
     let (auth_url, pkce_verifier, csrf_token) = oauth.auth_url();
 
     println!("Opening browser for authorization...");
@@ -52,7 +48,7 @@ pub async fn login() -> Result<()> {
     }
 
     let code = wait_for_code(csrf_token, callback_config)?;
-    let token = oauth
+    let token = settings
         .exchange_code(AuthorizationCode::new(code), pkce_verifier)
         .await?;
 
