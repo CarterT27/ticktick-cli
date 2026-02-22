@@ -1,1 +1,10 @@
-/target
+target/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Local environment files
+.env
+.env.*
+!.env.example
