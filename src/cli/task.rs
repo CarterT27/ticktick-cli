@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use atty::Stream;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
 use clap::{Args, Subcommand};
+use std::collections::HashSet;
 use std::io::{self, Read};
 
 #[derive(Subcommand)]
@@ -386,6 +387,10 @@ fn normalize_list_name(value: &str) -> String {
         .join(" ")
 }
 
+fn is_inbox_list_name(value: &str) -> bool {
+    value.eq_ignore_ascii_case("inbox") || normalize_list_name(value) == "inbox"
+}
+
 fn parse_task_date(value: &str) -> Option<NaiveDate> {
     if let Ok(epoch) = value.parse::<i64>() {
         let dt = if value.len() > 10 {
@@ -522,7 +527,21 @@ async fn get_tasks_across_projects(client: &TickTickClient) -> Result<Vec<Task>>
         tasks.extend(get_tasks_for_project(client, &project_id).await?);
     }
 
+    // TickTick's OpenAPI `/project` can omit Inbox, so fetch it explicitly.
+    if let Ok(inbox_tasks) = client.get_inbox_tasks().await {
+        tasks.extend(inbox_tasks);
+    }
+
+    dedupe_tasks_by_id(&mut tasks);
     Ok(tasks)
+}
+
+fn dedupe_tasks_by_id(tasks: &mut Vec<Task>) {
+    let mut seen = HashSet::new();
+    tasks.retain(|task| match task.id.as_deref() {
+        Some(id) => seen.insert(id.to_string()),
+        None => true,
+    });
 }
 
 async fn resolve_task_project_id(
@@ -729,10 +748,32 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
         args.when = shorthand.when;
     }
     merge_tags(&mut args.tags, shorthand.tags);
-    let search_terms = shorthand.terms;
+    let mut search_terms = shorthand.terms;
 
-    let project_id = resolve_project_id(&client, args.project_id, args.list).await?;
-    let mut tasks = if let Some(project_id) = project_id {
+    // Convenience alias: treat `tt ls inbox` / `tt ls Inbox` like `--list inbox`.
+    if args.project_id.is_none()
+        && args.list.is_none()
+        && search_terms.len() == 1
+        && search_terms.first().is_some_and(|term| is_inbox_list_name(term))
+    {
+        args.list = search_terms.pop();
+    }
+
+    let inbox_only = args.project_id.is_none()
+        && args
+            .list
+            .as_deref()
+            .is_some_and(is_inbox_list_name);
+
+    let project_id = if inbox_only {
+        None
+    } else {
+        resolve_project_id(&client, args.project_id, args.list.clone()).await?
+    };
+
+    let mut tasks = if inbox_only {
+        client.get_inbox_tasks().await?
+    } else if let Some(project_id) = project_id {
         get_tasks_for_project(&client, &project_id).await?
     } else {
         get_tasks_across_projects(&client).await?
