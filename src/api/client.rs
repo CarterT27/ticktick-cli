@@ -97,6 +97,13 @@ impl TickTickClient {
         Ok(data.tasks.unwrap_or_default())
     }
 
+    pub async fn get_project_data_value(&self, project_id: &str) -> Result<serde_json::Value> {
+        let endpoint = format!("/project/{}/data", project_id);
+        let response = self.request("GET", &endpoint, None).await?;
+        let data: serde_json::Value = response.json().await.context("Failed to parse response")?;
+        Ok(data)
+    }
+
     pub async fn create_project(&self, project: &Project) -> Result<Project> {
         let body = json!(project);
         let response = self.request("POST", "/project", Some(body)).await?;

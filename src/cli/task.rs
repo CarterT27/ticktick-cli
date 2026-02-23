@@ -7,6 +7,7 @@ use atty::Stream;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
 use clap::{Args, Subcommand};
 use std::collections::HashSet;
+use serde_json::Value;
 use std::io::{self, Read};
 
 #[derive(Subcommand)]
@@ -391,6 +392,87 @@ fn is_inbox_list_name(value: &str) -> bool {
     value.eq_ignore_ascii_case("inbox") || normalize_list_name(value) == "inbox"
 }
 
+fn extract_implicit_list_from_terms(terms: &mut Vec<String>) -> Option<String> {
+    if terms.len() == 1 && is_inbox_list_name(&terms[0]) {
+        return Some(terms.remove(0));
+    }
+
+    None
+}
+
+fn normalize_project_id(value: Option<String>) -> Option<String> {
+    value.and_then(|id| {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn task_project_id_or_fallback(task: &Task, project_id: &str) -> Option<String> {
+    normalize_project_id(task.project_id.clone())
+        .or_else(|| normalize_project_id(Some(project_id.to_string())))
+}
+
+fn parse_tasks_array(value: &Value) -> Option<Vec<Task>> {
+    serde_json::from_value::<Vec<Task>>(value.clone()).ok()
+}
+
+fn parse_lossy_tasks_array(value: &Value) -> Option<Vec<Task>> {
+    let values = value.as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(|item| serde_json::from_value::<Task>(item.clone()).ok())
+            .collect(),
+    )
+}
+
+fn extract_inbox_tasks_from_value(value: &Value) -> Option<Vec<Task>> {
+    if let Some(tasks) = value.get("tasks").and_then(parse_tasks_array) {
+        return Some(tasks);
+    }
+
+    for key in ["data", "result"] {
+        if let Some(tasks) = value
+            .get(key)
+            .and_then(|wrapped| wrapped.get("tasks"))
+            .and_then(parse_tasks_array)
+        {
+            return Some(tasks);
+        }
+    }
+
+    if let Some(tasks) = value.get("task").and_then(|task| {
+        serde_json::from_value::<Task>(task.clone())
+            .ok()
+            .map(|parsed| vec![parsed])
+    }) {
+        return Some(tasks);
+    }
+
+    if let Some(sync) = value.get("syncTaskBean") {
+        if let Some(tasks) = sync.get("tasks").and_then(parse_tasks_array) {
+            return Some(tasks);
+        }
+
+        let mut merged = Vec::new();
+        for key in ["update", "add"] {
+            if let Some(tasks) = sync.get(key).and_then(parse_lossy_tasks_array) {
+                merged.extend(tasks);
+            }
+        }
+
+        if !merged.is_empty() {
+            return Some(merged);
+        }
+    }
+
+    parse_tasks_array(value)
+}
+
 fn parse_task_date(value: &str) -> Option<NaiveDate> {
     if let Ok(epoch) = value.parse::<i64>() {
         let dt = if value.len() > 10 {
@@ -461,13 +543,24 @@ async fn resolve_project_from_list(client: &TickTickClient, list_name: &str) -> 
         .find(|p| {
             p.name.eq_ignore_ascii_case(list_name)
                 || (!needle.is_empty() && normalize_list_name(&p.name) == needle)
-        })
-        .ok_or_else(|| anyhow!("List not found: {}", list_name))?;
+        });
 
-    project
-        .id
-        .clone()
-        .ok_or_else(|| anyhow!("List '{}' has no project ID", list_name))
+    let Some(project) = project else {
+        if is_inbox_list_name(list_name) {
+            return Ok(String::new());
+        }
+        return Err(anyhow!("List not found: {}", list_name));
+    };
+
+    if let Some(project_id) = normalize_project_id(project.id.clone()) {
+        return Ok(project_id);
+    }
+
+    if project.kind.as_deref() == Some("INBOX") || project.name.eq_ignore_ascii_case("inbox") {
+        return Ok(String::new());
+    }
+
+    Err(anyhow!("List '{}' has no project ID", list_name))
 }
 
 async fn resolve_project_id(
@@ -512,6 +605,34 @@ async fn infer_default_project_id(client: &TickTickClient) -> Result<String> {
 }
 
 async fn get_tasks_for_project(client: &TickTickClient, project_id: &str) -> Result<Vec<Task>> {
+    if project_id.trim().is_empty() {
+        let mut last_error = None;
+        for candidate in ["", "inbox", "INBOX"] {
+            match client.get_project_data_value(candidate).await {
+                Ok(data) => {
+                    if let Some(tasks) = extract_inbox_tasks_from_value(&data) {
+                        return Ok(tasks);
+                    }
+
+                    let preview = serde_json::to_string(&data)
+                        .unwrap_or_else(|_| "<invalid json>".to_string());
+                    last_error = Some(anyhow!(
+                        "Inbox payload did not include parseable tasks: {}",
+                        preview.chars().take(240).collect::<String>()
+                    ));
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        return Err(anyhow!(
+            "Unable to fetch Inbox tasks from the API.{}",
+            last_error
+                .map(|e| format!(" Last error: {}", e))
+                .unwrap_or_default()
+        ));
+    }
+
     let data = client.get_project_data(project_id).await?;
     Ok(data.tasks.unwrap_or_default())
 }
@@ -550,11 +671,19 @@ async fn resolve_task_project_id(
     project_id: Option<String>,
     list_name: Option<String>,
 ) -> Result<String> {
+    let inbox_requested = list_name
+        .as_deref()
+        .map(is_inbox_list_name)
+        .unwrap_or(false);
+
     if let Some(project_id) = resolve_project_id(client, project_id, list_name).await? {
-        return Ok(project_id);
+        if let Some(project_id) = normalize_project_id(Some(project_id)) {
+            return Ok(project_id);
+        }
     }
 
     let projects = client.get_projects().await?;
+    let mut found_without_project_id = false;
 
     for project in projects {
         let Some(project_id) = project.id else {
@@ -562,15 +691,41 @@ async fn resolve_task_project_id(
         };
 
         let data = client.get_project_data(&project_id).await?;
-        let found = data
+        if let Some(task) = data
             .tasks
             .unwrap_or_default()
             .iter()
-            .any(|t| t.id.as_deref() == Some(task_id));
-
-        if found {
-            return Ok(project_id);
+            .find(|t| t.id.as_deref() == Some(task_id))
+        {
+            if let Some(resolved_id) = task_project_id_or_fallback(task, &project_id) {
+                return Ok(resolved_id);
+            }
+            found_without_project_id = true;
         }
+    }
+
+    let inbox_tasks = get_tasks_for_project(client, "").await;
+    match inbox_tasks {
+        Ok(tasks) => {
+            if let Some(task) = tasks.iter().find(|t| t.id.as_deref() == Some(task_id)) {
+                if let Some(resolved_id) = task_project_id_or_fallback(task, "") {
+                    return Ok(resolved_id);
+                }
+                found_without_project_id = true;
+            }
+        }
+        Err(err) => {
+            if inbox_requested {
+                return Err(err);
+            }
+        }
+    }
+
+    if found_without_project_id {
+        return Err(anyhow!(
+            "Task '{}' was found, but its list ID is unavailable. Pass a non-empty --project-id.",
+            task_id
+        ));
     }
 
     Err(anyhow!(
@@ -749,6 +904,12 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
     }
     merge_tags(&mut args.tags, shorthand.tags);
     let mut search_terms = shorthand.terms;
+
+    if args.project_id.is_none() && args.list.is_none() {
+        if let Some(list_name) = extract_implicit_list_from_terms(&mut search_terms) {
+            args.list = Some(list_name);
+        }
+    }
 
     // Convenience alias: treat `tt ls inbox` / `tt ls Inbox` like `--list inbox`.
     if args.project_id.is_none()
@@ -1174,6 +1335,92 @@ mod tests {
         assert_eq!(normalize_list_name("🚀Personal"), "personal");
         assert_eq!(normalize_list_name("👨🏻‍💻 Projects"), "projects");
         assert_eq!(normalize_list_name("Personal Team"), "personal team");
+    }
+
+    #[test]
+    fn detects_inbox_list_name_variants() {
+        assert!(is_inbox_list_name("inbox"));
+        assert!(is_inbox_list_name("Inbox"));
+        assert!(is_inbox_list_name("  Inbox  "));
+        assert!(is_inbox_list_name("📥 Inbox"));
+        assert!(!is_inbox_list_name("work"));
+    }
+
+    #[test]
+    fn extracts_implicit_inbox_list_from_single_term() {
+        let mut terms = vec!["inbox".to_string()];
+        assert_eq!(
+            extract_implicit_list_from_terms(&mut terms),
+            Some("inbox".to_string())
+        );
+        assert!(terms.is_empty());
+
+        let mut terms = vec!["inbox".to_string(), "urgent".to_string()];
+        assert_eq!(extract_implicit_list_from_terms(&mut terms), None);
+        assert_eq!(terms, vec!["inbox".to_string(), "urgent".to_string()]);
+    }
+
+    #[test]
+    fn extracts_inbox_tasks_from_multiple_payload_shapes() {
+        let direct = serde_json::json!({
+            "tasks": [
+                {"id": "a", "title": "one", "projectId": "p"}
+            ]
+        });
+        let wrapped = serde_json::json!({
+            "data": {
+                "tasks": [
+                    {"id": "b", "title": "two", "projectId": "p"}
+                ]
+            }
+        });
+        let array = serde_json::json!([
+            {"id": "c", "title": "three", "projectId": "p"}
+        ]);
+        let sync = serde_json::json!({
+            "syncTaskBean": {
+                "update": [
+                    {"id": "d", "title": "four", "projectId": "p"}
+                ]
+            }
+        });
+
+        assert_eq!(extract_inbox_tasks_from_value(&direct).unwrap().len(), 1);
+        assert_eq!(extract_inbox_tasks_from_value(&wrapped).unwrap().len(), 1);
+        assert_eq!(extract_inbox_tasks_from_value(&array).unwrap().len(), 1);
+        assert_eq!(extract_inbox_tasks_from_value(&sync).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn normalizes_project_ids() {
+        assert_eq!(normalize_project_id(None), None);
+        assert_eq!(normalize_project_id(Some("".to_string())), None);
+        assert_eq!(normalize_project_id(Some("   ".to_string())), None);
+        assert_eq!(
+            normalize_project_id(Some("  abc123  ".to_string())),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn task_project_id_prefers_task_and_falls_back_to_container() {
+        let mut task = Task {
+            title: "sample".to_string(),
+            ..Default::default()
+        };
+        task.project_id = Some("real-project".to_string());
+        assert_eq!(
+            task_project_id_or_fallback(&task, ""),
+            Some("real-project".to_string())
+        );
+
+        task.project_id = None;
+        assert_eq!(
+            task_project_id_or_fallback(&task, "container-project"),
+            Some("container-project".to_string())
+        );
+
+        assert_eq!(task_project_id_or_fallback(&task, "  "), None);
     }
 
     #[test]
