@@ -334,4 +334,62 @@ mod tests {
 
         assert!(cache.get_task_project_id("stale-task").unwrap().is_none());
     }
+    #[test]
+    fn save_and_invalidate_projects_round_trip() {
+        let cache = CacheStore::from_dir(temp_cache_dir()).unwrap();
+        let projects = vec![Project {
+            id: Some("p1".to_string()),
+            name: "Inbox".to_string(),
+            ..Default::default()
+        }];
+
+        cache.save_projects(&projects).unwrap();
+        let loaded = cache.load_projects().unwrap().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id.as_deref(), Some("p1"));
+
+        cache.invalidate_projects().unwrap();
+        assert!(cache.load_projects().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_get_and_remove_task_project_id_normalize_values() {
+        let cache = CacheStore::from_dir(temp_cache_dir()).unwrap();
+
+        cache
+            .set_task_project_id("  task-1  ", "  project-1 ")
+            .unwrap();
+        assert_eq!(
+            cache.get_task_project_id("task-1").unwrap(),
+            Some("project-1".to_string())
+        );
+
+        cache.set_task_project_id("   ", "project-ignored").unwrap();
+        cache.set_task_project_id("task-ignored", "   ").unwrap();
+        assert!(cache.get_task_project_id("task-ignored").unwrap().is_none());
+
+        cache.remove_task_project_id(" task-1 ").unwrap();
+        assert!(cache.get_task_project_id("task-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_all_removes_all_cache_files() {
+        let cache = CacheStore::from_dir(temp_cache_dir()).unwrap();
+        cache
+            .save_projects(&[Project {
+                id: Some("p1".to_string()),
+                name: "Inbox".to_string(),
+                ..Default::default()
+            }])
+            .unwrap();
+        cache.set_task_project_id("task-1", "project-1").unwrap();
+
+        assert!(cache.projects_path().exists());
+        assert!(cache.task_projects_path().exists());
+
+        cache.clear_all().unwrap();
+
+        assert!(!cache.projects_path().exists());
+        assert!(!cache.task_projects_path().exists());
+    }
 }

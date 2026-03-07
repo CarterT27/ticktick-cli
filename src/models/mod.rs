@@ -173,3 +173,75 @@ pub struct ProjectData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<Column>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Debug, Deserialize)]
+    struct OptionalStringWrapper {
+        #[serde(default, deserialize_with = "deserialize_opt_string")]
+        value: Option<String>,
+    }
+
+    #[test]
+    fn deserialize_opt_string_accepts_scalars_and_nested_values() {
+        let number: OptionalStringWrapper = serde_json::from_value(json!({ "value": 42 })).unwrap();
+        assert_eq!(number.value.as_deref(), Some("42"));
+
+        let boolean: OptionalStringWrapper =
+            serde_json::from_value(json!({ "value": true })).unwrap();
+        assert_eq!(boolean.value.as_deref(), Some("true"));
+
+        let object: OptionalStringWrapper =
+            serde_json::from_value(json!({ "value": { "nested": "value" } })).unwrap();
+        assert_eq!(object.value.as_deref(), Some("{\"nested\":\"value\"}"));
+
+        let null_value: OptionalStringWrapper =
+            serde_json::from_value(json!({ "value": null })).unwrap();
+        assert_eq!(null_value.value, None);
+    }
+
+    #[test]
+    fn task_status_serializes_and_deserializes_supported_values() {
+        assert_eq!(serde_json::to_string(&TaskStatus::Normal).unwrap(), "0");
+        assert_eq!(serde_json::to_string(&TaskStatus::Completed).unwrap(), "2");
+
+        assert_eq!(
+            serde_json::from_value::<TaskStatus>(json!(0)).unwrap(),
+            TaskStatus::Normal
+        );
+        assert_eq!(
+            serde_json::from_value::<TaskStatus>(json!("2")).unwrap(),
+            TaskStatus::Completed
+        );
+    }
+
+    #[test]
+    fn task_status_rejects_unsupported_values() {
+        let err = serde_json::from_value::<TaskStatus>(json!(1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Unsupported task status value: 1"));
+    }
+
+    #[test]
+    fn task_deserialization_normalizes_non_string_date_fields() {
+        let task: Task = serde_json::from_value(json!({
+            "title": "Review PR",
+            "dueDate": 1710000000,
+            "completedTime": false,
+            "startDate": { "seconds": 30 },
+            "status": "0"
+        }))
+        .unwrap();
+
+        assert_eq!(task.title, "Review PR");
+        assert_eq!(task.due_date.as_deref(), Some("1710000000"));
+        assert_eq!(task.completed_time.as_deref(), Some("false"));
+        assert_eq!(task.start_date.as_deref(), Some("{\"seconds\":30}"));
+        assert_eq!(task.status, Some(TaskStatus::Normal));
+    }
+}

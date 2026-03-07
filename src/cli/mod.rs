@@ -88,3 +88,31 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Status => status().await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_auth_and_top_level_alias_commands() {
+        let auth_cli = Cli::try_parse_from(["tt", "auth", "signin"]).unwrap();
+        assert!(matches!(
+            auth_cli.command,
+            Commands::Auth {
+                subcommand: auth::AuthCommands::Login
+            }
+        ));
+
+        let login_cli = Cli::try_parse_from(["tt", "login"]).unwrap();
+        assert!(matches!(login_cli.command, Commands::Login));
+    }
+
+    #[test]
+    fn parses_task_and_project_shortcuts() {
+        let list_cli = Cli::try_parse_from(["tt", "ls", "inbox"]).unwrap();
+        assert!(matches!(list_cli.command, Commands::Ls(_)));
+
+        let projects_cli = Cli::try_parse_from(["tt", "projects", "--name", "Work"]).unwrap();
+        assert!(matches!(projects_cli.command, Commands::Projects(_)));
+    }
+}

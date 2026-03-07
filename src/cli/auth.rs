@@ -74,20 +74,7 @@ fn wait_for_code(csrf_token: CsrfToken) -> Result<String> {
     std::thread::spawn(move || {
         if let Ok(request) = server.recv() {
             let url = format!("http://localhost{}", request.url());
-            let parsed = Url::parse(&url).ok();
-            let mut code: Option<String> = None;
-            let mut state: Option<String> = None;
-
-            if let Some(parsed) = parsed {
-                for (key, value) in parsed.query_pairs() {
-                    if key == "code" {
-                        code = Some(value.to_string());
-                    }
-                    if key == "state" {
-                        state = Some(value.to_string());
-                    }
-                }
-            }
+            let (code, state) = extract_callback_params(&url);
 
             let body = "Authentication complete. You can close this window.";
             let _ = request.respond(Response::from_string(body));
@@ -120,32 +107,108 @@ pub async fn logout() -> Result<()> {
 pub async fn status() -> Result<()> {
     let app_config = AppConfig::new()?;
 
-    match app_config.load()? {
-        Some(config) => {
-            println!("Status: Authenticated");
-            println!(
-                "Access Token: {}...{}",
-                &config.access_token[0..8],
-                &config.access_token[config.access_token.len() - 8..]
-            );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)?
+        .as_secs() as i64;
 
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)?
-                .as_secs() as i64;
-
-            let remaining = config.expires_at - now;
-
-            if remaining > 0 {
-                println!("Token expires in: {} minutes", remaining / 60);
-            } else {
-                println!("Token expired! Please login again.");
-            }
-        }
-        None => {
-            println!("Status: Not authenticated");
-            println!("Run 'tt auth login' to authenticate.");
-        }
+    for line in format_status_lines(app_config.load()?.as_ref(), now) {
+        println!("{}", line);
     }
 
     Ok(())
+}
+
+fn extract_callback_params(url: &str) -> (Option<String>, Option<String>) {
+    let parsed = Url::parse(url).ok();
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+
+    if let Some(parsed) = parsed {
+        for (key, value) in parsed.query_pairs() {
+            if key == "code" {
+                code = Some(value.to_string());
+            }
+            if key == "state" {
+                state = Some(value.to_string());
+            }
+        }
+    }
+
+    (code, state)
+}
+
+fn format_status_lines(config: Option<&Config>, now: i64) -> Vec<String> {
+    match config {
+        Some(config) => {
+            let remaining = config.expires_at - now;
+            let mut lines = vec![
+                "Status: Authenticated".to_string(),
+                format!(
+                    "Access Token: {}...{}",
+                    &config.access_token[0..8],
+                    &config.access_token[config.access_token.len() - 8..]
+                ),
+            ];
+
+            if remaining > 0 {
+                lines.push(format!("Token expires in: {} minutes", remaining / 60));
+            } else {
+                lines.push("Token expired! Please login again.".to_string());
+            }
+
+            lines
+        }
+        None => vec![
+            "Status: Not authenticated".to_string(),
+            "Run 'tt auth login' to authenticate.".to_string(),
+        ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config(expires_at: i64) -> Config {
+        Config {
+            access_token: "12345678abcdefgh".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn extract_callback_params_returns_code_and_state() {
+        let (code, state) =
+            extract_callback_params("http://localhost/callback?code=auth-code&state=csrf-token");
+
+        assert_eq!(code.as_deref(), Some("auth-code"));
+        assert_eq!(state.as_deref(), Some("csrf-token"));
+    }
+
+    #[test]
+    fn extract_callback_params_handles_invalid_urls() {
+        let (code, state) = extract_callback_params("not a url");
+        assert_eq!(code, None);
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn format_status_lines_for_authenticated_session() {
+        let lines = format_status_lines(Some(&sample_config(4_000)), 1_000);
+
+        assert_eq!(lines[0], "Status: Authenticated");
+        assert_eq!(lines[1], "Access Token: 12345678...abcdefgh");
+        assert_eq!(lines[2], "Token expires in: 50 minutes");
+    }
+
+    #[test]
+    fn format_status_lines_for_expired_or_missing_session() {
+        let expired = format_status_lines(Some(&sample_config(900)), 1_000);
+        assert_eq!(expired[2], "Token expired! Please login again.");
+
+        let missing = format_status_lines(None, 1_000);
+        assert_eq!(missing[0], "Status: Not authenticated");
+        assert_eq!(missing[1], "Run 'tt auth login' to authenticate.");
+    }
 }
