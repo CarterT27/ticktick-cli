@@ -32,6 +32,17 @@ Also add your redirect URL in the TickTick Developer Center app settings (for ex
 
 ## Install
 
+### Install with Homebrew
+
+Install the latest tagged release from the tap:
+
+```bash
+brew tap CarterT27/tap
+brew install CarterT27/tap/ticktick-cli
+```
+
+### Build it Yourself
+
 1. Clone the repo:
 
 ```bash
