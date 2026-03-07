@@ -1,8 +1,13 @@
 use crate::api::TickTickClient;
+use crate::cache::{get_projects_cached, CacheStore};
 use crate::config::AppConfig;
 use crate::output::{print_projects, OutputFormat};
 use anyhow::Result;
 use clap::{Args, Subcommand};
+
+fn cache_store() -> Option<CacheStore> {
+    CacheStore::new().ok()
+}
 
 #[derive(Subcommand)]
 pub enum ProjectCommands {
@@ -39,6 +44,7 @@ pub async fn project_add(args: ProjectAddArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
 
     let project = crate::models::Project {
         id: None,
@@ -51,6 +57,9 @@ pub async fn project_add(args: ProjectAddArgs) -> Result<()> {
     };
 
     let created = client.create_project(&project).await?;
+    if let Some(cache) = cache.as_ref() {
+        let _ = cache.invalidate_projects();
+    }
 
     match args.output {
         OutputFormat::Json => {
@@ -79,8 +88,9 @@ pub async fn project_list(args: ProjectListArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
 
-    let mut projects = client.get_projects().await?;
+    let mut projects = get_projects_cached(&client, cache.as_ref(), false).await?;
 
     if let Some(name) = args.name {
         projects.retain(|p| p.name.contains(&name));
@@ -170,6 +180,7 @@ pub async fn project_update(args: ProjectUpdateArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
 
     let mut project = client.get_project(&args.project_id).await?;
 
@@ -192,6 +203,9 @@ pub async fn project_update(args: ProjectUpdateArgs) -> Result<()> {
     project.id = Some(args.project_id.clone());
 
     let updated = client.update_project(&args.project_id, &project).await?;
+    if let Some(cache) = cache.as_ref() {
+        let _ = cache.invalidate_projects();
+    }
     println!("Project updated: {}", updated.name);
     Ok(())
 }
@@ -209,6 +223,16 @@ pub async fn project_delete(args: ProjectDeleteArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
+
+    if !args.confirm {
+        client.delete_project(&args.project_id).await?;
+        if let Some(cache) = cache.as_ref() {
+            let _ = cache.invalidate_projects();
+        }
+        println!("Project deleted: {}", args.project_id);
+        return Ok(());
+    }
 
     let project = client.get_project(&args.project_id).await?;
 
@@ -226,6 +250,9 @@ pub async fn project_delete(args: ProjectDeleteArgs) -> Result<()> {
     }
 
     client.delete_project(&args.project_id).await?;
+    if let Some(cache) = cache.as_ref() {
+        let _ = cache.invalidate_projects();
+    }
     println!("Project deleted: {}", project.name);
     Ok(())
 }

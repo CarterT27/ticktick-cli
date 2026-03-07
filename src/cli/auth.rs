@@ -1,3 +1,4 @@
+use crate::cache::CacheStore;
 use crate::config::auth::TickTickOAuth;
 use crate::config::AppConfig;
 use crate::config::Config;
@@ -53,6 +54,9 @@ pub async fn login() -> Result<()> {
 
     let app_config = AppConfig::new()?;
     app_config.save(&config)?;
+    if let Ok(cache) = CacheStore::new() {
+        let _ = cache.clear_all();
+    }
 
     println!("Successfully authenticated!");
     println!(
@@ -106,6 +110,9 @@ fn wait_for_code(csrf_token: CsrfToken) -> Result<String> {
 pub async fn logout() -> Result<()> {
     let app_config = AppConfig::new()?;
     app_config.clear()?;
+    if let Ok(cache) = CacheStore::new() {
+        let _ = cache.clear_all();
+    }
     println!("Successfully logged out.");
     Ok(())
 }

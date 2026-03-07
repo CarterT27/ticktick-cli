@@ -1,4 +1,5 @@
 use crate::api::TickTickClient;
+use crate::cache::{get_projects_cached, CacheStore};
 use crate::config::AppConfig;
 use crate::models::{Task, TaskStatus};
 use crate::output::{print_tasks, OutputFormat};
@@ -6,9 +7,10 @@ use anyhow::{anyhow, Result};
 use atty::Stream;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
 use clap::{Args, Subcommand};
-use std::collections::HashSet;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::{self, Read};
+use tokio::task::JoinSet;
 
 #[derive(Subcommand)]
 pub enum TaskCommands {
@@ -39,6 +41,44 @@ pub enum TaskWhenFilter {
     Tomorrow,
     #[value(alias = "thisweek", alias = "this-week", alias = "week")]
     ThisWeek,
+}
+
+const MAX_CONCURRENT_PROJECT_FETCHES: usize = 8;
+
+#[derive(Debug, Clone)]
+struct ResolvedTaskProjectId {
+    project_id: String,
+    from_cache: bool,
+}
+
+fn cache_store() -> Option<CacheStore> {
+    CacheStore::new().ok()
+}
+
+fn remember_tasks(cache: Option<&CacheStore>, tasks: &[Task], fallback_project_id: Option<&str>) {
+    if let Some(cache) = cache {
+        let _ = cache.remember_tasks(tasks, fallback_project_id);
+    }
+}
+
+fn remember_task(cache: Option<&CacheStore>, task: &Task, fallback_project_id: Option<&str>) {
+    remember_tasks(cache, std::slice::from_ref(task), fallback_project_id);
+}
+
+fn remember_task_project_id(cache: Option<&CacheStore>, task_id: &str, project_id: &str) {
+    if let Some(cache) = cache {
+        let _ = cache.set_task_project_id(task_id, project_id);
+    }
+}
+
+fn forget_task_project_id(cache: Option<&CacheStore>, task_id: &str) {
+    if let Some(cache) = cache {
+        let _ = cache.remove_task_project_id(task_id);
+    }
+}
+
+fn cached_task_project_id(cache: Option<&CacheStore>, task_id: &str) -> Option<String> {
+    cache.and_then(|cache| cache.get_task_project_id(task_id).ok().flatten())
 }
 
 fn parse_priority_shorthand(token: &str) -> Option<i32> {
@@ -534,16 +574,18 @@ fn task_matches_when_filter(task: &Task, when: TaskWhenFilter, today: NaiveDate)
     task_date >= start && task_date <= end
 }
 
-async fn resolve_project_from_list(client: &TickTickClient, list_name: &str) -> Result<String> {
-    let projects = client.get_projects().await?;
+async fn resolve_project_from_list(
+    client: &TickTickClient,
+    cache: Option<&CacheStore>,
+    list_name: &str,
+) -> Result<String> {
+    let projects = get_projects_cached(client, cache, false).await?;
     let needle = normalize_list_name(list_name);
 
-    let project = projects
-        .iter()
-        .find(|p| {
-            p.name.eq_ignore_ascii_case(list_name)
-                || (!needle.is_empty() && normalize_list_name(&p.name) == needle)
-        });
+    let project = projects.iter().find(|p| {
+        p.name.eq_ignore_ascii_case(list_name)
+            || (!needle.is_empty() && normalize_list_name(&p.name) == needle)
+    });
 
     let Some(project) = project else {
         if is_inbox_list_name(list_name) {
@@ -565,6 +607,7 @@ async fn resolve_project_from_list(client: &TickTickClient, list_name: &str) -> 
 
 async fn resolve_project_id(
     client: &TickTickClient,
+    cache: Option<&CacheStore>,
     project_id: Option<String>,
     list_name: Option<String>,
 ) -> Result<Option<String>> {
@@ -573,14 +616,19 @@ async fn resolve_project_id(
     }
 
     if let Some(list_name) = list_name {
-        return Ok(Some(resolve_project_from_list(client, &list_name).await?));
+        return Ok(Some(
+            resolve_project_from_list(client, cache, &list_name).await?,
+        ));
     }
 
     Ok(None)
 }
 
-async fn infer_default_project_id(client: &TickTickClient) -> Result<String> {
-    let projects = client.get_projects().await?;
+async fn infer_default_project_id(
+    client: &TickTickClient,
+    cache: Option<&CacheStore>,
+) -> Result<String> {
+    let projects = get_projects_cached(client, cache, false).await?;
 
     if projects.is_empty() {
         return Err(anyhow!(
@@ -606,6 +654,10 @@ async fn infer_default_project_id(client: &TickTickClient) -> Result<String> {
 
 async fn get_tasks_for_project(client: &TickTickClient, project_id: &str) -> Result<Vec<Task>> {
     if project_id.trim().is_empty() {
+        if let Ok(tasks) = client.get_inbox_tasks().await {
+            return Ok(tasks);
+        }
+
         let mut last_error = None;
         for candidate in ["", "inbox", "INBOX"] {
             match client.get_project_data_value(candidate).await {
@@ -637,19 +689,56 @@ async fn get_tasks_for_project(client: &TickTickClient, project_id: &str) -> Res
     Ok(data.tasks.unwrap_or_default())
 }
 
-async fn get_tasks_across_projects(client: &TickTickClient) -> Result<Vec<Task>> {
-    let projects = client.get_projects().await?;
-    let mut tasks = Vec::new();
+async fn fetch_tasks_for_project_batch(
+    client: &TickTickClient,
+    project_ids: &[String],
+) -> Result<Vec<(String, Vec<Task>)>> {
+    let mut results = Vec::with_capacity(project_ids.len());
+    let mut tasks = JoinSet::new();
 
-    for project in projects {
-        let Some(project_id) = project.id else {
-            continue;
-        };
-        tasks.extend(get_tasks_for_project(client, &project_id).await?);
+    for (index, project_id) in project_ids.iter().cloned().enumerate() {
+        let client = client.clone();
+        tasks.spawn(async move {
+            let data = client.get_project_data(&project_id).await?;
+            Ok::<_, anyhow::Error>((index, project_id, data.tasks.unwrap_or_default()))
+        });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        let (index, project_id, tasks_for_project) =
+            result.map_err(|err| anyhow!("Task fetch worker failed: {}", err))??;
+        results.push((index, project_id, tasks_for_project));
+    }
+
+    results.sort_by_key(|(index, _, _)| *index);
+    Ok(results
+        .into_iter()
+        .map(|(_, project_id, tasks_for_project)| (project_id, tasks_for_project))
+        .collect())
+}
+
+async fn get_tasks_across_projects(
+    client: &TickTickClient,
+    cache: Option<&CacheStore>,
+) -> Result<Vec<Task>> {
+    let projects = get_projects_cached(client, cache, false).await?;
+    let mut tasks = Vec::new();
+    let project_ids: Vec<String> = projects
+        .into_iter()
+        .filter_map(|project| normalize_project_id(project.id))
+        .collect();
+
+    for batch in project_ids.chunks(MAX_CONCURRENT_PROJECT_FETCHES) {
+        let batch_tasks = fetch_tasks_for_project_batch(client, batch).await?;
+        for (project_id, project_tasks) in batch_tasks {
+            remember_tasks(cache, &project_tasks, Some(&project_id));
+            tasks.extend(project_tasks);
+        }
     }
 
     // TickTick's OpenAPI `/project` can omit Inbox, so fetch it explicitly.
-    if let Ok(inbox_tasks) = client.get_inbox_tasks().await {
+    if let Ok(inbox_tasks) = get_tasks_for_project(client, "").await {
+        remember_tasks(cache, &inbox_tasks, None);
         tasks.extend(inbox_tasks);
     }
 
@@ -667,49 +756,74 @@ fn dedupe_tasks_by_id(tasks: &mut Vec<Task>) {
 
 async fn resolve_task_project_id(
     client: &TickTickClient,
+    cache: Option<&CacheStore>,
     task_id: &str,
     project_id: Option<String>,
     list_name: Option<String>,
-) -> Result<String> {
+) -> Result<ResolvedTaskProjectId> {
     let inbox_requested = list_name
         .as_deref()
         .map(is_inbox_list_name)
         .unwrap_or(false);
 
-    if let Some(project_id) = resolve_project_id(client, project_id, list_name).await? {
+    if let Some(project_id) =
+        resolve_project_id(client, cache, project_id, list_name.clone()).await?
+    {
         if let Some(project_id) = normalize_project_id(Some(project_id)) {
-            return Ok(project_id);
+            return Ok(ResolvedTaskProjectId {
+                project_id,
+                from_cache: false,
+            });
         }
     }
 
-    let projects = client.get_projects().await?;
+    if list_name.is_none() {
+        if let Some(project_id) = cached_task_project_id(cache, task_id) {
+            return Ok(ResolvedTaskProjectId {
+                project_id,
+                from_cache: true,
+            });
+        }
+    }
+
+    let projects = get_projects_cached(client, cache, false).await?;
+    let project_ids: Vec<String> = projects
+        .into_iter()
+        .filter_map(|project| normalize_project_id(project.id))
+        .collect();
     let mut found_without_project_id = false;
 
-    for project in projects {
-        let Some(project_id) = project.id else {
-            continue;
-        };
-
-        let data = client.get_project_data(&project_id).await?;
-        if let Some(task) = data
-            .tasks
-            .unwrap_or_default()
-            .iter()
-            .find(|t| t.id.as_deref() == Some(task_id))
-        {
-            if let Some(resolved_id) = task_project_id_or_fallback(task, &project_id) {
-                return Ok(resolved_id);
+    for batch in project_ids.chunks(MAX_CONCURRENT_PROJECT_FETCHES) {
+        let batch_tasks = fetch_tasks_for_project_batch(client, batch).await?;
+        for (project_id, tasks_for_project) in batch_tasks {
+            remember_tasks(cache, &tasks_for_project, Some(&project_id));
+            if let Some(task) = tasks_for_project
+                .iter()
+                .find(|task| task.id.as_deref() == Some(task_id))
+            {
+                if let Some(resolved_id) = task_project_id_or_fallback(task, &project_id) {
+                    remember_task_project_id(cache, task_id, &resolved_id);
+                    return Ok(ResolvedTaskProjectId {
+                        project_id: resolved_id,
+                        from_cache: false,
+                    });
+                }
+                found_without_project_id = true;
             }
-            found_without_project_id = true;
         }
     }
 
     let inbox_tasks = get_tasks_for_project(client, "").await;
     match inbox_tasks {
         Ok(tasks) => {
+            remember_tasks(cache, &tasks, None);
             if let Some(task) = tasks.iter().find(|t| t.id.as_deref() == Some(task_id)) {
                 if let Some(resolved_id) = task_project_id_or_fallback(task, "") {
-                    return Ok(resolved_id);
+                    remember_task_project_id(cache, task_id, &resolved_id);
+                    return Ok(ResolvedTaskProjectId {
+                        project_id: resolved_id,
+                        from_cache: false,
+                    });
                 }
                 found_without_project_id = true;
             }
@@ -776,6 +890,7 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
 
     let raw_input = if args.stdin || (!atty::is(Stream::Stdin) && args.title.is_empty()) {
         let mut buffer = String::new();
@@ -816,17 +931,18 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
         return Err(anyhow!("Task title required or provide stdin"));
     }
 
-    let project_id = match resolve_project_id(&client, args.project_id, args.list).await? {
-        Some(project_id) => project_id,
-        None => infer_default_project_id(&client).await?,
-    };
+    let project_id =
+        match resolve_project_id(&client, cache.as_ref(), args.project_id, args.list).await? {
+            Some(project_id) => project_id,
+            None => infer_default_project_id(&client, cache.as_ref()).await?,
+        };
 
     let task = crate::models::Task {
         id: None,
         title,
         content: args.content,
         desc: args.desc,
-        project_id: Some(project_id),
+        project_id: Some(project_id.clone()),
         start_date: args.start_date,
         due_date: args.due_date,
         time_zone: args.time_zone,
@@ -849,6 +965,7 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
     };
 
     let created = client.create_task(&task).await?;
+    remember_task(cache.as_ref(), &created, Some(&project_id));
 
     match args.output {
         OutputFormat::Json => {
@@ -891,6 +1008,7 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
 
     let shorthand = parse_shorthand(&args.query.join(" "));
     if args.priority.is_none() {
@@ -915,30 +1033,30 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
     if args.project_id.is_none()
         && args.list.is_none()
         && search_terms.len() == 1
-        && search_terms.first().is_some_and(|term| is_inbox_list_name(term))
+        && search_terms
+            .first()
+            .is_some_and(|term| is_inbox_list_name(term))
     {
         args.list = search_terms.pop();
     }
 
-    let inbox_only = args.project_id.is_none()
-        && args
-            .list
-            .as_deref()
-            .is_some_and(is_inbox_list_name);
+    let inbox_only =
+        args.project_id.is_none() && args.list.as_deref().is_some_and(is_inbox_list_name);
 
     let project_id = if inbox_only {
         None
     } else {
-        resolve_project_id(&client, args.project_id, args.list.clone()).await?
+        resolve_project_id(&client, cache.as_ref(), args.project_id, args.list.clone()).await?
     };
 
     let mut tasks = if inbox_only {
-        client.get_inbox_tasks().await?
-    } else if let Some(project_id) = project_id {
+        get_tasks_for_project(&client, "").await?
+    } else if let Some(ref project_id) = project_id {
         get_tasks_for_project(&client, &project_id).await?
     } else {
-        get_tasks_across_projects(&client).await?
+        get_tasks_across_projects(&client, cache.as_ref()).await?
     };
+    remember_tasks(cache.as_ref(), &tasks, project_id.as_deref());
 
     if let Some(status) = args.status {
         let normalized = status.to_ascii_lowercase();
@@ -1038,16 +1156,28 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
+    let explicit_scope = args.project_id.is_some() || args.list.is_some();
 
-    let project_id = resolve_task_project_id(
+    let mut resolved = resolve_task_project_id(
         &client,
+        cache.as_ref(),
         &args.task_id,
         args.project_id.clone(),
         args.list.clone(),
     )
     .await?;
 
-    let mut task = client.get_task(&project_id, &args.task_id).await?;
+    let mut task = match client.get_task(&resolved.project_id, &args.task_id).await {
+        Ok(task) => task,
+        Err(_) if resolved.from_cache && !explicit_scope => {
+            forget_task_project_id(cache.as_ref(), &args.task_id);
+            resolved =
+                resolve_task_project_id(&client, cache.as_ref(), &args.task_id, None, None).await?;
+            client.get_task(&resolved.project_id, &args.task_id).await?
+        }
+        Err(err) => return Err(err),
+    };
 
     if let Some(title) = args.title {
         task.title = title;
@@ -1081,6 +1211,7 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
     }
 
     let updated = client.update_task(&args.task_id, &task).await?;
+    remember_task(cache.as_ref(), &updated, Some(&resolved.project_id));
 
     match args.output {
         OutputFormat::Json => {
@@ -1111,11 +1242,34 @@ pub async fn task_complete(args: TaskCompleteArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
+    let cache = cache_store();
+    let explicit_scope = args.project_id.is_some() || args.list.is_some();
 
-    let project_id =
-        resolve_task_project_id(&client, &args.task_id, args.project_id, args.list).await?;
+    let mut resolved = resolve_task_project_id(
+        &client,
+        cache.as_ref(),
+        &args.task_id,
+        args.project_id,
+        args.list,
+    )
+    .await?;
 
-    client.complete_task(&project_id, &args.task_id).await?;
+    if let Err(err) = client
+        .complete_task(&resolved.project_id, &args.task_id)
+        .await
+    {
+        if resolved.from_cache && !explicit_scope {
+            forget_task_project_id(cache.as_ref(), &args.task_id);
+            resolved =
+                resolve_task_project_id(&client, cache.as_ref(), &args.task_id, None, None).await?;
+            client
+                .complete_task(&resolved.project_id, &args.task_id)
+                .await?;
+        } else {
+            return Err(err);
+        }
+    }
+    remember_task_project_id(cache.as_ref(), &args.task_id, &resolved.project_id);
 
     if args.output {
         println!("Task completed: {}", args.task_id);
@@ -1141,9 +1295,16 @@ pub async fn task_delete(args: TaskDeleteArgs) -> Result<()> {
         .load()?
         .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
     let client = TickTickClient::new(config)?;
-
-    let project_id =
-        resolve_task_project_id(&client, &args.task_id, args.project_id, args.list).await?;
+    let cache = cache_store();
+    let explicit_scope = args.project_id.is_some() || args.list.is_some();
+    let mut resolved = resolve_task_project_id(
+        &client,
+        cache.as_ref(),
+        &args.task_id,
+        args.project_id,
+        args.list,
+    )
+    .await?;
 
     if args.confirm {
         println!(
@@ -1158,7 +1319,22 @@ pub async fn task_delete(args: TaskDeleteArgs) -> Result<()> {
         }
     }
 
-    client.delete_task(&project_id, &args.task_id).await?;
+    if let Err(err) = client
+        .delete_task(&resolved.project_id, &args.task_id)
+        .await
+    {
+        if resolved.from_cache && !explicit_scope {
+            forget_task_project_id(cache.as_ref(), &args.task_id);
+            resolved =
+                resolve_task_project_id(&client, cache.as_ref(), &args.task_id, None, None).await?;
+            client
+                .delete_task(&resolved.project_id, &args.task_id)
+                .await?;
+        } else {
+            return Err(err);
+        }
+    }
+    forget_task_project_id(cache.as_ref(), &args.task_id);
     println!("Task deleted: {}", args.task_id);
 
     Ok(())
