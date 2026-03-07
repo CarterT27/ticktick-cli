@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub mod auth;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub access_token: String,
     pub refresh_token: String,
@@ -129,6 +129,13 @@ impl AppConfig {
         }
 
         Ok(())
+    }
+
+    pub async fn load_authenticated(&self) -> Result<Config> {
+        let config = self
+            .load()?
+            .ok_or_else(|| anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+        auth::refresh_config_if_needed(self, config).await
     }
 
     pub fn config_file_path(&self) -> &PathBuf {

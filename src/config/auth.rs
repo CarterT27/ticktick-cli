@@ -1,3 +1,4 @@
+use super::{AppConfig, Config};
 use anyhow::{anyhow, Context, Result};
 use oauth2::{
     basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
@@ -5,11 +6,13 @@ use oauth2::{
     TokenResponse, TokenType, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_AUTH_URL: &str = "https://ticktick.com/oauth/authorize";
 const DEFAULT_TOKEN_URL: &str = "https://ticktick.com/oauth/token";
 pub const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
+const DEFAULT_EXPIRES_IN_SECS: i64 = 3600;
+const REFRESH_MARGIN_SECS: i64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthSettings {
@@ -114,6 +117,29 @@ impl AuthSettings {
     }
 }
 
+pub async fn refresh_config_if_needed(app_config: &AppConfig, config: Config) -> Result<Config> {
+    if !token_needs_refresh(config.expires_at)? {
+        return Ok(config);
+    }
+
+    let settings = AuthSettings::from_env()?;
+    let current_refresh_token = config.refresh_token.clone();
+    let token = settings.refresh_access_token(&current_refresh_token).await?;
+
+    let refreshed = Config {
+        access_token: token.access_token,
+        refresh_token: if token.refresh_token.is_empty() {
+            config.refresh_token
+        } else {
+            token.refresh_token
+        },
+        expires_at: token.expires_at,
+    };
+
+    app_config.save(&refreshed)?;
+    Ok(refreshed)
+}
+
 fn required_env<F>(get_var: &F, key: &str) -> Result<String>
 where
     F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
@@ -129,6 +155,17 @@ where
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn token_needs_refresh(expires_at: i64) -> Result<bool> {
+    Ok(expires_at <= unix_timestamp()? + REFRESH_MARGIN_SECS)
+}
+
+fn unix_timestamp() -> Result<i64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("System time is before UNIX_EPOCH")?
+        .as_secs() as i64)
 }
 
 #[derive(Debug, Clone)]
@@ -273,11 +310,11 @@ async fn send_broker_token_request<T: Serialize>(
     }
 
     let token = response
-        .json::<BrokerTokenResponse>()
+        .json::<TokenEndpointResponse>()
         .await
         .context("Failed to parse OAuth broker token response")?;
 
-    broker_token_response_data(token)
+    TokenResponseData::from_token_endpoint_response(token)
 }
 
 #[derive(Debug, Serialize)]
@@ -293,7 +330,7 @@ struct BrokerRefreshRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct BrokerTokenResponse {
+struct TokenEndpointResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
@@ -306,37 +343,32 @@ pub struct TokenResponseData {
     pub expires_at: i64,
 }
 
+impl TokenResponseData {
+    fn from_token_endpoint_response(token: TokenEndpointResponse) -> Result<Self> {
+        Ok(Self {
+            access_token: token.access_token,
+            refresh_token: token.refresh_token.unwrap_or_default(),
+            expires_at: unix_timestamp()? + token.expires_in.unwrap_or(DEFAULT_EXPIRES_IN_SECS),
+        })
+    }
+}
+
 fn token_response_data<T, TT>(token: &T) -> Result<TokenResponseData>
 where
     T: TokenResponse<TT>,
     TT: TokenType,
 {
-    let expires_at = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_secs() as i64
-        + token
-            .expires_in()
-            .unwrap_or(Duration::from_secs(3600))
-            .as_secs() as i64;
-
     Ok(TokenResponseData {
         access_token: token.access_token().secret().to_string(),
         refresh_token: token
             .refresh_token()
-            .map(|t| t.secret().to_string())
+            .map(|token| token.secret().to_string())
             .unwrap_or_default(),
-        expires_at,
-    })
-}
-
-fn broker_token_response_data(token: BrokerTokenResponse) -> Result<TokenResponseData> {
-    Ok(TokenResponseData {
-        access_token: token.access_token,
-        refresh_token: token.refresh_token.unwrap_or_default(),
-        expires_at: SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs() as i64
-            + token.expires_in.unwrap_or(3600),
+        expires_at: unix_timestamp()?
+            + token
+                .expires_in()
+                .unwrap_or(Duration::from_secs(DEFAULT_EXPIRES_IN_SECS as u64))
+                .as_secs() as i64,
     })
 }
 
