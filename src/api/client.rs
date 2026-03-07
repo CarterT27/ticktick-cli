@@ -40,19 +40,20 @@ impl TickTickClient {
         endpoint: &str,
         body: Option<serde_json::Value>,
     ) -> Result<Response> {
-        let url = format!("{}{}", BASE_URL, endpoint);
+        validate_http_method(method)?;
+        let url = build_url(endpoint);
         let mut request = match method {
             "GET" => self.client.get(&url),
             "POST" => self.client.post(&url),
             "PUT" => self.client.put(&url),
             "DELETE" => self.client.delete(&url),
-            _ => return Err(anyhow!("Unsupported HTTP method: {}", method)),
+            _ => unreachable!("validate_http_method rejects unsupported methods"),
         };
 
         request = request
             .header(
                 header::AUTHORIZATION,
-                format!("Bearer {}", self.config.access_token),
+                bearer_token_value(&self.config.access_token),
             )
             .header(header::CONTENT_TYPE, "application/json");
 
@@ -94,7 +95,7 @@ impl TickTickClient {
     pub async fn get_inbox_tasks(&self) -> Result<Vec<Task>> {
         let response = self.request("GET", "/project/inbox/data", None).await?;
         let data: InboxProjectData = response.json().await.context("Failed to parse response")?;
-        Ok(data.tasks.unwrap_or_default())
+        Ok(inbox_tasks_from_data(data))
     }
 
     pub async fn get_project_data_value(&self, project_id: &str) -> Result<serde_json::Value> {
@@ -157,5 +158,77 @@ impl TickTickClient {
         let endpoint = format!("/project/{}/task/{}", project_id, task_id);
         self.request("DELETE", &endpoint, None).await?;
         Ok(())
+    }
+}
+
+fn inbox_tasks_from_data(data: InboxProjectData) -> Vec<Task> {
+    data.tasks.unwrap_or_default()
+}
+
+fn validate_http_method(method: &str) -> Result<()> {
+    match method {
+        "GET" | "POST" | "PUT" | "DELETE" => Ok(()),
+        _ => Err(anyhow!("Unsupported HTTP method: {}", method)),
+    }
+}
+
+fn build_url(endpoint: &str) -> String {
+    format!("{}{}", BASE_URL, endpoint)
+}
+
+fn bearer_token_value(access_token: &str) -> String {
+    format!("Bearer {}", access_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validate_http_method_accepts_supported_methods() {
+        for method in ["GET", "POST", "PUT", "DELETE"] {
+            validate_http_method(method).unwrap();
+        }
+    }
+
+    #[test]
+    fn validate_http_method_rejects_unsupported_methods() {
+        let err = validate_http_method("PATCH").unwrap_err().to_string();
+        assert!(err.contains("Unsupported HTTP method: PATCH"));
+    }
+
+    #[test]
+    fn inbox_task_extraction_defaults_to_empty_list() {
+        let data: InboxProjectData = serde_json::from_value(json!({})).unwrap();
+        assert!(inbox_tasks_from_data(data).is_empty());
+    }
+
+    #[test]
+    fn inbox_task_extraction_returns_present_tasks() {
+        let data: InboxProjectData = serde_json::from_value(json!({
+            "tasks": [
+                { "id": "task-1", "title": "Follow up" }
+            ]
+        }))
+        .unwrap();
+
+        let tasks = inbox_tasks_from_data(data);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id.as_deref(), Some("task-1"));
+        assert_eq!(tasks[0].title, "Follow up");
+    }
+
+    #[test]
+    fn build_url_joins_base_url_and_endpoint() {
+        assert_eq!(
+            build_url("/project/inbox/data"),
+            "https://api.ticktick.com/open/v1/project/inbox/data"
+        );
+    }
+
+    #[test]
+    fn bearer_token_value_formats_authorization_header() {
+        assert_eq!(bearer_token_value("abc123"), "Bearer abc123");
     }
 }

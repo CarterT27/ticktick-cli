@@ -84,3 +84,56 @@ pub struct TokenResponseData {
     pub refresh_token: String,
     pub expires_at: i64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use url::Url;
+
+    #[test]
+    fn new_rejects_invalid_redirect_uri() {
+        let result = TickTickOAuth::new(
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            "not a valid redirect".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_url_contains_expected_oauth_parameters() {
+        let oauth = TickTickOAuth::new(
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            "http://localhost/callback".to_string(),
+        )
+        .unwrap();
+
+        let (auth_url, pkce_verifier, csrf_token) = oauth.auth_url();
+        let parsed = Url::parse(&auth_url).unwrap();
+        let query: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(parsed.host_str(), Some("ticktick.com"));
+        assert_eq!(parsed.path(), "/oauth/authorize");
+        assert_eq!(query.get("client_id"), Some(&"client-id".to_string()));
+        assert_eq!(
+            query.get("redirect_uri"),
+            Some(&"http://localhost/callback".to_string())
+        );
+        assert_eq!(query.get("response_type"), Some(&"code".to_string()));
+        assert_eq!(
+            query.get("scope"),
+            Some(&"tasks:write tasks:read".to_string())
+        );
+        assert_eq!(
+            query.get("code_challenge_method"),
+            Some(&"S256".to_string())
+        );
+        assert!(query.contains_key("code_challenge"));
+        assert!(!pkce_verifier.secret().is_empty());
+        assert!(!csrf_token.secret().is_empty());
+    }
+}
