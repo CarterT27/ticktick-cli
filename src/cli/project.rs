@@ -41,9 +41,7 @@ pub struct ProjectAddArgs {
 
 pub async fn project_add(args: ProjectAddArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
 
@@ -69,9 +67,7 @@ pub struct ProjectListArgs {
 
 pub async fn project_list(args: ProjectListArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
 
@@ -91,9 +87,7 @@ pub struct ProjectGetArgs {
 
 pub async fn project_get(args: ProjectGetArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
 
     let project = client.get_project(&args.project_id).await?;
@@ -111,9 +105,7 @@ pub struct ProjectDataArgs {
 
 pub async fn project_data(args: ProjectDataArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
 
     let data = client.get_project_data(&args.project_id).await?;
@@ -139,9 +131,7 @@ pub struct ProjectUpdateArgs {
 
 pub async fn project_update(args: ProjectUpdateArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
 
@@ -165,9 +155,7 @@ pub struct ProjectDeleteArgs {
 
 pub async fn project_delete(args: ProjectDeleteArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
 

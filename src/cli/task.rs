@@ -886,9 +886,7 @@ pub struct TaskAddArgs {
 pub async fn task_add(args: TaskAddArgs) -> Result<()> {
     let mut args = args;
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
 
@@ -1004,9 +1002,7 @@ pub struct TaskListArgs {
 pub async fn task_list(args: TaskListArgs) -> Result<()> {
     let mut args = args;
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
 
@@ -1152,9 +1148,7 @@ pub struct TaskUpdateArgs {
 
 pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
     let explicit_scope = args.project_id.is_some() || args.list.is_some();
@@ -1238,9 +1232,7 @@ pub struct TaskCompleteArgs {
 
 pub async fn task_complete(args: TaskCompleteArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
     let explicit_scope = args.project_id.is_some() || args.list.is_some();
@@ -1291,9 +1283,7 @@ pub struct TaskDeleteArgs {
 
 pub async fn task_delete(args: TaskDeleteArgs) -> Result<()> {
     let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
+    let config = app_config.load_authenticated().await?;
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
     let explicit_scope = args.project_id.is_some() || args.list.is_some();
