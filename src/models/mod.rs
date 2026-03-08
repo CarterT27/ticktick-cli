@@ -122,7 +122,8 @@ impl<'de> Deserialize<'de> for TaskStatus {
         };
 
         match value {
-            0 => Ok(TaskStatus::Normal),
+            // TickTick can return `1` for active non-completed tasks in some payloads.
+            0 | 1 => Ok(TaskStatus::Normal),
             2 => Ok(TaskStatus::Completed),
             _ => Err(de::Error::custom(format!(
                 "Unsupported task status value: {}",
@@ -214,6 +215,10 @@ mod tests {
             TaskStatus::Normal
         );
         assert_eq!(
+            serde_json::from_value::<TaskStatus>(json!(1)).unwrap(),
+            TaskStatus::Normal
+        );
+        assert_eq!(
             serde_json::from_value::<TaskStatus>(json!("2")).unwrap(),
             TaskStatus::Completed
         );
@@ -221,10 +226,32 @@ mod tests {
 
     #[test]
     fn task_status_rejects_unsupported_values() {
-        let err = serde_json::from_value::<TaskStatus>(json!(1))
+        let err = serde_json::from_value::<TaskStatus>(json!(3))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("Unsupported task status value: 1"));
+        assert!(err.contains("Unsupported task status value: 3"));
+    }
+
+    #[test]
+    fn project_data_deserialization_accepts_non_terminal_task_statuses() {
+        let data: ProjectData = serde_json::from_value(json!({
+            "project": {
+                "id": "project-1",
+                "name": "Work"
+            },
+            "tasks": [
+                {
+                    "id": "task-1",
+                    "title": "Investigate parser bug",
+                    "status": 1
+                }
+            ]
+        }))
+        .unwrap();
+
+        let tasks = data.tasks.expect("tasks should be present");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, Some(TaskStatus::Normal));
     }
 
     #[test]
