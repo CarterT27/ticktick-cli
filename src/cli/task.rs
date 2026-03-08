@@ -574,6 +574,10 @@ fn task_matches_when_filter(task: &Task, when: TaskWhenFilter, today: NaiveDate)
     task_date >= start && task_date <= end
 }
 
+fn task_is_completed(task: &Task) -> bool {
+    matches!(task.status, Some(TaskStatus::Completed))
+}
+
 async fn resolve_project_from_list(
     client: &TickTickClient,
     cache: Option<&CacheStore>,
@@ -1072,11 +1076,10 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
         };
 
         tasks.retain(|t| {
-            let completed = matches!(t.status, Some(TaskStatus::Completed));
             if is_done {
-                completed
+                task_is_completed(t)
             } else {
-                !completed
+                !task_is_completed(t)
             }
         });
     }
@@ -1711,6 +1714,23 @@ mod tests {
     fn parse_task_date_rejects_invalid_values() {
         assert_eq!(parse_task_date(""), None);
         assert_eq!(parse_task_date("not-a-date"), None);
+    }
+
+    #[test]
+    fn treats_non_terminal_task_statuses_as_open() {
+        let active: Task = serde_json::from_value(serde_json::json!({
+            "title": "Investigate parser bug",
+            "status": 1
+        }))
+        .unwrap();
+        let completed = Task {
+            title: "Ship fix".to_string(),
+            status: Some(TaskStatus::Completed),
+            ..Default::default()
+        };
+
+        assert!(!task_is_completed(&active));
+        assert!(task_is_completed(&completed));
     }
 
     #[test]
