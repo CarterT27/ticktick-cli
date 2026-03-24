@@ -1,5 +1,4 @@
-use crate::api::TickTickClient;
-use crate::config::AppConfig;
+use super::bootstrap::authenticated_client;
 use crate::output::{print_tags, OutputFormat};
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -19,11 +18,7 @@ pub struct TagAddArgs {
 }
 
 pub async fn tag_add(args: TagAddArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let _client = TickTickClient::new(config)?;
+    let _client = authenticated_client()?;
 
     println!("Note: Tags are added by including them in task titles or using task update");
     println!("Tag example: {}", args.tag);
@@ -57,11 +52,7 @@ pub struct TagListArgs {
 }
 
 pub async fn tag_list(args: TagListArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let mut tags = client.get_tags().await?;
 
@@ -81,11 +72,7 @@ pub struct TagDeleteArgs {
 }
 
 pub async fn tag_delete(args: TagDeleteArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let _client = TickTickClient::new(config)?;
+    let _client = authenticated_client()?;
 
     if args.force {
         println!("Tag deletion is not directly supported by the API.");

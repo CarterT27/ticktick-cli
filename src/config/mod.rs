@@ -15,10 +15,32 @@ pub struct Config {
     pub expires_at: i64,
 }
 
+impl Config {
+    pub fn is_access_token_expired(&self, now: i64) -> bool {
+        self.expires_at <= now
+    }
+
+    pub fn update_tokens(&mut self, access_token: String, refresh_token: String, expires_at: i64) {
+        self.access_token = access_token;
+        if !refresh_token.is_empty() {
+            self.refresh_token = refresh_token;
+        }
+        self.expires_at = expires_at;
+    }
+}
+
 #[derive(Clone)]
 pub struct AppConfig {
     config_file: PathBuf,
     token_store: Arc<dyn TokenStore>,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("config_file", &self.config_file)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AppConfig {
@@ -330,5 +352,33 @@ expires_at = 987654321
         assert!(contents.contains("expires_at = 987654321"));
         assert!(!contents.contains("legacy-access"));
         assert!(!contents.contains("legacy-refresh"));
+    }
+
+    #[test]
+    fn access_token_expiration_check_uses_expires_at() {
+        let config = Config {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            expires_at: 100,
+        };
+
+        assert!(config.is_access_token_expired(100));
+        assert!(config.is_access_token_expired(101));
+        assert!(!config.is_access_token_expired(99));
+    }
+
+    #[test]
+    fn update_tokens_preserves_refresh_token_when_refresh_response_omits_it() {
+        let mut config = Config {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            expires_at: 100,
+        };
+
+        config.update_tokens("new-access-token".to_string(), String::new(), 200);
+
+        assert_eq!(config.access_token, "new-access-token");
+        assert_eq!(config.refresh_token, "refresh-token");
+        assert_eq!(config.expires_at, 200);
     }
 }
