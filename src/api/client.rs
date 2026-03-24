@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::models::{Column, Project, ProjectData, Task};
 use anyhow::{anyhow, Context, Result};
 use reqwest::{header, Client, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const BASE_URL: &str = "https://api.ticktick.com/open/v1";
@@ -140,9 +140,12 @@ impl TickTickClient {
         Ok(created)
     }
 
-    pub async fn update_task(&self, task_id: &str, task: &Task) -> Result<Task> {
+    pub async fn update_task<T>(&self, task_id: &str, task: &T) -> Result<Task>
+    where
+        T: Serialize + ?Sized,
+    {
         let endpoint = format!("/task/{}", task_id);
-        let body = json!(task);
+        let body = serde_json::to_value(task).context("Failed to serialize task update")?;
         let response = self.request("POST", &endpoint, Some(body)).await?;
         let updated: Task = response.json().await.context("Failed to parse response")?;
         Ok(updated)
