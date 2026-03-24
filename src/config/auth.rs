@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use oauth2::{
-    basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
-    ClientSecret, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, Scope,
-    TokenResponse, TokenType, TokenUrl,
+    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
+    EndpointNotSet, EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken,
+    Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,6 +13,9 @@ pub const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
 const DEFAULT_SHARED_CLIENT_ID: &str = "Ul8jc7U2kv5DwjN6Uw";
 const DEFAULT_BROKER_URL: &str = "https://ticktick-auth-broker.carter-tran.workers.dev";
 const DEFAULT_EXPIRES_IN_SECS: i64 = 3600;
+
+type TickTickOAuthClient =
+    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthSettings {
@@ -149,7 +152,8 @@ fn unix_timestamp() -> Result<i64> {
 
 #[derive(Debug, Clone)]
 pub struct TickTickOAuth {
-    client: BasicClient,
+    client: TickTickOAuthClient,
+    http_client: reqwest::Client,
     scopes: Vec<String>,
 }
 
@@ -163,16 +167,22 @@ impl TickTickOAuth {
         let token_url = TokenUrl::new(DEFAULT_TOKEN_URL.to_string())?;
         let redirect_url = RedirectUrl::new(redirect_uri)?;
 
-        let client = BasicClient::new(
-            ClientId::new(client_id),
-            client_secret.map(ClientSecret::new),
-            auth_url,
-            Some(token_url),
-        )
-        .set_redirect_uri(redirect_url);
+        let mut client = BasicClient::new(ClientId::new(client_id))
+            .set_auth_uri(auth_url)
+            .set_token_uri(token_url)
+            .set_redirect_uri(redirect_url);
+        if let Some(client_secret) = client_secret {
+            client = client.set_client_secret(ClientSecret::new(client_secret));
+        }
+
+        let http_client = reqwest::ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("Failed to build OAuth HTTP client")?;
 
         Ok(Self {
             client,
+            http_client,
             scopes: vec!["tasks:write".to_string(), "tasks:read".to_string()],
         })
     }
@@ -200,7 +210,7 @@ impl TickTickOAuth {
             .client
             .exchange_code(code)
             .set_pkce_verifier(pkce_verifier)
-            .request_async(async_http_client)
+            .request_async(&self.http_client)
             .await?;
 
         token_response_data(&token)
@@ -210,7 +220,7 @@ impl TickTickOAuth {
         let token = self
             .client
             .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
-            .request_async(async_http_client)
+            .request_async(&self.http_client)
             .await?;
 
         token_response_data(&token)
@@ -320,10 +330,9 @@ impl TokenResponseData {
     }
 }
 
-fn token_response_data<T, TT>(token: &T) -> Result<TokenResponseData>
+fn token_response_data<T>(token: &T) -> Result<TokenResponseData>
 where
-    T: TokenResponse<TT>,
-    TT: TokenType,
+    T: TokenResponse,
 {
     Ok(TokenResponseData {
         access_token: token.access_token().secret().to_string(),
