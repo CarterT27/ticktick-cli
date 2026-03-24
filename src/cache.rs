@@ -257,14 +257,15 @@ fn is_fresh(updated_at: i64, ttl_secs: i64, now: i64) -> bool {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_cache_dir() -> PathBuf {
         let path = env::temp_dir().join(format!(
-            "ticktick-cli-cache-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "ticktick-cli-cache-test-{}-{}",
+            std::process::id(),
+            TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
         path

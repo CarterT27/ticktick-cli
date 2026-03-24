@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub mod auth;
 use std::path::PathBuf;
@@ -74,9 +74,13 @@ impl AppConfig {
             toml::from_str(&contents).context("Failed to parse config file")?;
 
         if let Some(config) = stored.legacy_config() {
-            self.token_store
-                .save(&StoredTokens::from_config(&config))
-                .context("Failed to migrate credentials to secure storage")?;
+            if let Err(err) = self.token_store.save(&StoredTokens::from_config(&config)) {
+                if secure_storage_unavailable(&err) {
+                    return Ok(Some(config));
+                }
+
+                return Err(err).context("Failed to migrate credentials to secure storage");
+            }
             self.write_metadata(ConfigMetadata::from_config(&config))
                 .context("Failed to rewrite config file without credentials")?;
             return Ok(Some(config));
@@ -110,12 +114,20 @@ impl AppConfig {
     }
 
     pub fn clear(&self) -> Result<()> {
+        let had_legacy_config = self.has_legacy_plaintext_config()?;
+
         if self.config_file.exists() {
             fs::remove_file(&self.config_file).context("Failed to remove config file")?;
         }
-        self.token_store
-            .clear()
-            .context("Failed to clear credentials from secure storage")?;
+
+        if let Err(err) = self.token_store.clear() {
+            if had_legacy_config && secure_storage_unavailable(&err) {
+                return Ok(());
+            }
+
+            return Err(err).context("Failed to clear credentials from secure storage");
+        }
+
         Ok(())
     }
 
@@ -135,6 +147,18 @@ impl AppConfig {
             toml::to_string_pretty(&metadata).context("Failed to serialize config metadata")?;
 
         fs::write(&self.config_file, contents).context("Failed to write config file")
+    }
+
+    fn has_legacy_plaintext_config(&self) -> Result<bool> {
+        if !self.config_file.exists() {
+            return Ok(false);
+        }
+
+        let contents =
+            fs::read_to_string(&self.config_file).context("Failed to read config file")?;
+        let stored: StoredConfig =
+            toml::from_str(&contents).context("Failed to parse config file")?;
+        Ok(stored.legacy_config().is_some())
     }
 }
 
@@ -250,19 +274,34 @@ impl TokenStore for KeyringTokenStore {
     }
 }
 
+fn secure_storage_unavailable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<KeyringError>()
+            .is_some_and(|keyring_err| {
+                matches!(
+                    keyring_err,
+                    KeyringError::PlatformFailure(_) | KeyringError::NoStorageAccess(_)
+                )
+            })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_config_path() -> PathBuf {
         let dir = env::temp_dir().join(format!(
-            "ticktick-cli-config-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "ticktick-cli-config-test-{}-{}",
+            std::process::id(),
+            TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
         dir.join("config.toml")
@@ -291,6 +330,41 @@ mod tests {
 
     fn test_app_config(path: PathBuf) -> AppConfig {
         AppConfig::with_token_store(path, Arc::new(MemoryTokenStore::default()))
+    }
+
+    #[derive(Debug)]
+    struct ErrorTokenStore {
+        save_error: Option<String>,
+        clear_error: Option<String>,
+    }
+
+    impl ErrorTokenStore {
+        fn secure_storage_error(message: &str) -> anyhow::Error {
+            anyhow::Error::new(KeyringError::NoStorageAccess(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                message.to_string(),
+            ))))
+        }
+    }
+
+    impl TokenStore for ErrorTokenStore {
+        fn load(&self) -> Result<Option<StoredTokens>> {
+            Ok(None)
+        }
+
+        fn save(&self, _tokens: &StoredTokens) -> Result<()> {
+            match &self.save_error {
+                Some(message) => Err(Self::secure_storage_error(message)),
+                None => Ok(()),
+            }
+        }
+
+        fn clear(&self) -> Result<()> {
+            match &self.clear_error {
+                Some(message) => Err(Self::secure_storage_error(message)),
+                None => Ok(()),
+            }
+        }
     }
 
     #[test]
@@ -352,6 +426,62 @@ expires_at = 987654321
         assert!(contents.contains("expires_at = 987654321"));
         assert!(!contents.contains("legacy-access"));
         assert!(!contents.contains("legacy-refresh"));
+    }
+
+    #[test]
+    fn load_keeps_legacy_plaintext_credentials_when_secure_storage_is_unavailable() {
+        let path = temp_config_path();
+        let app_config = AppConfig::with_token_store(
+            path.clone(),
+            Arc::new(ErrorTokenStore {
+                save_error: Some("secure storage unavailable".to_string()),
+                clear_error: None,
+            }),
+        );
+
+        fs::write(
+            &path,
+            r#"
+access_token = "legacy-access"
+refresh_token = "legacy-refresh"
+expires_at = 987654321
+"#,
+        )
+        .unwrap();
+
+        let loaded = app_config.load().unwrap().unwrap();
+        assert_eq!(loaded.access_token, "legacy-access");
+        assert_eq!(loaded.refresh_token, "legacy-refresh");
+        assert_eq!(loaded.expires_at, 987654321);
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("legacy-access"));
+        assert!(contents.contains("legacy-refresh"));
+    }
+
+    #[test]
+    fn clear_succeeds_for_legacy_plaintext_config_when_secure_storage_is_unavailable() {
+        let path = temp_config_path();
+        let app_config = AppConfig::with_token_store(
+            path.clone(),
+            Arc::new(ErrorTokenStore {
+                save_error: None,
+                clear_error: Some("secure storage unavailable".to_string()),
+            }),
+        );
+
+        fs::write(
+            &path,
+            r#"
+access_token = "legacy-access"
+refresh_token = "legacy-refresh"
+expires_at = 987654321
+"#,
+        )
+        .unwrap();
+
+        app_config.clear().unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
