@@ -1,4 +1,5 @@
 mod auth;
+mod bootstrap;
 mod project;
 mod task;
 
@@ -114,5 +115,29 @@ mod tests {
 
         let projects_cli = Cli::try_parse_from(["tt", "projects", "--name", "Work"]).unwrap();
         assert!(matches!(projects_cli.command, Commands::Projects(_)));
+    }
+
+    #[test]
+    fn parses_json_output_for_mutating_commands() {
+        let done_cli = Cli::try_parse_from(["tt", "done", "task-1", "--output", "json"]).unwrap();
+        assert!(matches!(done_cli.command, Commands::Done(_)));
+
+        let project_update_cli = Cli::try_parse_from([
+            "tt",
+            "project",
+            "update",
+            "project-1",
+            "--name",
+            "Renamed",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            project_update_cli.command,
+            Commands::Project {
+                subcommand: project::ProjectCommands::Update(_)
+            }
+        ));
     }
 }

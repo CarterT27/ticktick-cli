@@ -18,8 +18,7 @@ use self::projects::{
     infer_default_project_id, remember_task, remember_task_project_id, remember_tasks,
     resolve_project_id, resolve_task_project_id,
 };
-use crate::api::TickTickClient;
-use crate::config::AppConfig;
+use super::bootstrap::authenticated_client;
 use crate::models::{Task, TaskStatus};
 use crate::output::{print_tasks, OutputFormat};
 use anyhow::{anyhow, Result};
@@ -109,11 +108,7 @@ pub struct TaskAddArgs {
 
 pub async fn task_add(args: TaskAddArgs) -> Result<()> {
     let mut args = args;
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
 
     let raw_input = if args.stdin || (!atty::is(Stream::Stdin) && args.title.is_empty()) {
@@ -163,7 +158,7 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
 
     let (content, desc) = resolve_task_note_fields(args.content, args.desc);
 
-    let task = crate::models::Task {
+    let task = Task {
         id: None,
         title,
         content,
@@ -195,15 +190,7 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
     let created = client.create_task(&task).await?;
     remember_task(cache.as_ref(), &created, Some(&project_id));
 
-    match args.output {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&created)?);
-        }
-        OutputFormat::Human => {
-            println!("Task created: {}", created.title);
-            println!("ID: {}", created.id.clone().unwrap_or_default());
-        }
-    }
+    print!("{}", format_task_create_output(&created, args.output)?);
 
     Ok(())
 }
@@ -231,11 +218,7 @@ pub struct TaskListArgs {
 
 pub async fn task_list(args: TaskListArgs) -> Result<()> {
     let mut args = args;
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
 
     let shorthand = parse_shorthand(&args.query.join(" "));
@@ -380,11 +363,7 @@ pub struct TaskUpdateArgs {
 }
 
 pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
     let explicit_scope = args.project_id.is_some() || args.list.is_some();
 
@@ -454,14 +433,7 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
     let updated = client.update_task(&args.task_id, &task).await?;
     remember_task(cache.as_ref(), &updated, Some(&resolved.project_id));
 
-    match args.output {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&updated)?);
-        }
-        OutputFormat::Human => {
-            println!("Task updated: {}", updated.title);
-        }
-    }
+    print!("{}", format_task_update_output(&updated, args.output)?);
 
     Ok(())
 }
@@ -473,48 +445,39 @@ pub struct TaskCompleteArgs {
     project_id: Option<String>,
     #[arg(long)]
     list: Option<String>,
-    #[arg(long, default_value = "true")]
-    output: bool,
+    #[arg(long, default_value = "human")]
+    output: OutputFormat,
 }
 
 pub async fn task_complete(args: TaskCompleteArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let TaskCompleteArgs {
+        task_id,
+        project_id,
+        list,
+        output,
+    } = args;
+    let client = authenticated_client()?;
     let cache = cache_store();
-    let explicit_scope = args.project_id.is_some() || args.list.is_some();
+    let explicit_scope = project_id.is_some() || list.is_some();
 
-    let mut resolved = resolve_task_project_id(
-        &client,
-        cache.as_ref(),
-        &args.task_id,
-        args.project_id,
-        args.list,
-    )
-    .await?;
+    let mut resolved =
+        resolve_task_project_id(&client, cache.as_ref(), &task_id, project_id, list).await?;
 
-    if let Err(err) = client
-        .complete_task(&resolved.project_id, &args.task_id)
-        .await
-    {
+    if let Err(err) = client.complete_task(&resolved.project_id, &task_id).await {
         if resolved.from_cache && !explicit_scope {
-            forget_task_project_id(cache.as_ref(), &args.task_id);
+            forget_task_project_id(cache.as_ref(), &task_id);
             resolved =
-                resolve_task_project_id(&client, cache.as_ref(), &args.task_id, None, None).await?;
-            client
-                .complete_task(&resolved.project_id, &args.task_id)
-                .await?;
+                resolve_task_project_id(&client, cache.as_ref(), &task_id, None, None).await?;
+            client.complete_task(&resolved.project_id, &task_id).await?;
         } else {
             return Err(err);
         }
     }
-    remember_task_project_id(cache.as_ref(), &args.task_id, &resolved.project_id);
-
-    if args.output {
-        println!("Task completed: {}", args.task_id);
-    }
+    remember_task_project_id(cache.as_ref(), &task_id, &resolved.project_id);
+    print!(
+        "{}",
+        format_task_action_output(&task_id, &resolved.project_id, "completed", output)?
+    );
 
     Ok(())
 }
@@ -528,30 +491,26 @@ pub struct TaskDeleteArgs {
     list: Option<String>,
     #[arg(long, default_value = "true")]
     confirm: bool,
+    #[arg(long, default_value = "human")]
+    output: OutputFormat,
 }
 
 pub async fn task_delete(args: TaskDeleteArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let TaskDeleteArgs {
+        task_id,
+        project_id,
+        list,
+        confirm,
+        output,
+    } = args;
+    let client = authenticated_client()?;
     let cache = cache_store();
-    let explicit_scope = args.project_id.is_some() || args.list.is_some();
-    let mut resolved = resolve_task_project_id(
-        &client,
-        cache.as_ref(),
-        &args.task_id,
-        args.project_id,
-        args.list,
-    )
-    .await?;
+    let explicit_scope = project_id.is_some() || list.is_some();
+    let mut resolved =
+        resolve_task_project_id(&client, cache.as_ref(), &task_id, project_id, list).await?;
 
-    if args.confirm {
-        println!(
-            "Are you sure you want to delete task '{}'? [y/N]",
-            args.task_id
-        );
+    if confirm {
+        println!("Are you sure you want to delete task '{}'? [y/N]", task_id);
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
@@ -560,23 +519,58 @@ pub async fn task_delete(args: TaskDeleteArgs) -> Result<()> {
         }
     }
 
-    if let Err(err) = client
-        .delete_task(&resolved.project_id, &args.task_id)
-        .await
-    {
+    if let Err(err) = client.delete_task(&resolved.project_id, &task_id).await {
         if resolved.from_cache && !explicit_scope {
-            forget_task_project_id(cache.as_ref(), &args.task_id);
+            forget_task_project_id(cache.as_ref(), &task_id);
             resolved =
-                resolve_task_project_id(&client, cache.as_ref(), &args.task_id, None, None).await?;
-            client
-                .delete_task(&resolved.project_id, &args.task_id)
-                .await?;
+                resolve_task_project_id(&client, cache.as_ref(), &task_id, None, None).await?;
+            client.delete_task(&resolved.project_id, &task_id).await?;
         } else {
             return Err(err);
         }
     }
-    forget_task_project_id(cache.as_ref(), &args.task_id);
-    println!("Task deleted: {}", args.task_id);
+    forget_task_project_id(cache.as_ref(), &task_id);
+    print!(
+        "{}",
+        format_task_action_output(&task_id, &resolved.project_id, "deleted", output)?
+    );
 
     Ok(())
+}
+
+fn format_task_create_output(task: &Task, format: OutputFormat) -> Result<String> {
+    match format {
+        OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(task)?)),
+        OutputFormat::Human => Ok(format!(
+            "Task created: {}\nID: {}\n",
+            task.title,
+            task.id.clone().unwrap_or_default()
+        )),
+    }
+}
+
+fn format_task_update_output(task: &Task, format: OutputFormat) -> Result<String> {
+    match format {
+        OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(task)?)),
+        OutputFormat::Human => Ok(format!("Task updated: {}\n", task.title)),
+    }
+}
+
+fn format_task_action_output(
+    task_id: &str,
+    project_id: &str,
+    status: &str,
+    format: OutputFormat,
+) -> Result<String> {
+    match format {
+        OutputFormat::Json => Ok(format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": status,
+                "taskId": task_id,
+                "projectId": project_id,
+            }))?
+        )),
+        OutputFormat::Human => Ok(format!("Task {}: {}\n", status, task_id)),
+    }
 }

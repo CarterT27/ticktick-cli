@@ -13,6 +13,20 @@ pub struct Config {
     pub expires_at: i64,
 }
 
+impl Config {
+    pub fn is_access_token_expired(&self, now: i64) -> bool {
+        self.expires_at <= now
+    }
+
+    pub fn update_tokens(&mut self, access_token: String, refresh_token: String, expires_at: i64) {
+        self.access_token = access_token;
+        if !refresh_token.is_empty() {
+            self.refresh_token = refresh_token;
+        }
+        self.expires_at = expires_at;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     config_file: PathBuf,
@@ -71,15 +85,15 @@ impl AppConfig {
 mod tests {
     use super::*;
     use std::env;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_config_path() -> PathBuf {
         let dir = env::temp_dir().join(format!(
-            "ticktick-cli-config-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "ticktick-cli-config-test-{}-{}",
+            std::process::id(),
+            TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
         dir.join("config.toml")
@@ -117,5 +131,33 @@ mod tests {
         app_config.clear().unwrap();
         assert!(!path.exists());
         assert!(app_config.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn access_token_expiration_check_uses_expires_at() {
+        let config = Config {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            expires_at: 100,
+        };
+
+        assert!(config.is_access_token_expired(100));
+        assert!(config.is_access_token_expired(101));
+        assert!(!config.is_access_token_expired(99));
+    }
+
+    #[test]
+    fn update_tokens_preserves_refresh_token_when_refresh_response_omits_it() {
+        let mut config = Config {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            expires_at: 100,
+        };
+
+        config.update_tokens("new-access-token".to_string(), String::new(), 200);
+
+        assert_eq!(config.access_token, "new-access-token");
+        assert_eq!(config.refresh_token, "refresh-token");
+        assert_eq!(config.expires_at, 200);
     }
 }

@@ -87,6 +87,28 @@ fn add_shorthand_keeps_when_terms_for_title() {
 }
 
 #[test]
+fn format_task_mutation_outputs_match_selected_mode() {
+    let task = Task {
+        id: Some("task-1".to_string()),
+        title: "Inbox zero".to_string(),
+        ..Default::default()
+    };
+
+    let created = format_task_create_output(&task, OutputFormat::Human).unwrap();
+    assert!(created.contains("Task created: Inbox zero"));
+    assert!(created.contains("ID: task-1"));
+
+    let updated = format_task_update_output(&task, OutputFormat::Json).unwrap();
+    assert!(updated.contains("\"title\": \"Inbox zero\""));
+
+    let action =
+        format_task_action_output("task-1", "project-1", "completed", OutputFormat::Json).unwrap();
+    assert!(action.contains("\"status\": \"completed\""));
+    assert!(action.contains("\"taskId\": \"task-1\""));
+    assert!(action.contains("\"projectId\": \"project-1\""));
+}
+
+#[test]
 fn extracts_due_date_today_and_cleans_title() {
     let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
     let (title, date) = extract_due_date_from_input("finish report today", today);

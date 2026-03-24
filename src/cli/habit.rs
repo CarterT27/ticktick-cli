@@ -1,5 +1,4 @@
-use crate::api::TickTickClient;
-use crate::config::AppConfig;
+use super::bootstrap::authenticated_client;
 use crate::output::{print_habits, OutputFormat};
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -33,11 +32,7 @@ pub struct HabitAddArgs {
 }
 
 pub async fn habit_add(args: HabitAddArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let days = args
         .days
@@ -79,11 +74,7 @@ pub struct HabitListArgs {
 }
 
 pub async fn habit_list(args: HabitListArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let mut habits = client.get_habits().await?;
 
@@ -115,11 +106,7 @@ pub struct HabitUpdateArgs {
 }
 
 pub async fn habit_update(args: HabitUpdateArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let habits = client.get_habits().await?;
     let mut habit = habits
@@ -166,11 +153,7 @@ pub struct HabitDeleteArgs {
 }
 
 pub async fn habit_delete(args: HabitDeleteArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let habits = client.get_habits().await?;
     let habit = habits
