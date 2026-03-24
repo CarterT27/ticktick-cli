@@ -1,4 +1,3 @@
-use super::{AppConfig, Config};
 use anyhow::{anyhow, Context, Result};
 use oauth2::{
     basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
@@ -12,7 +11,6 @@ const DEFAULT_AUTH_URL: &str = "https://ticktick.com/oauth/authorize";
 const DEFAULT_TOKEN_URL: &str = "https://ticktick.com/oauth/token";
 pub const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
 const DEFAULT_EXPIRES_IN_SECS: i64 = 3600;
-const REFRESH_MARGIN_SECS: i64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthSettings {
@@ -117,29 +115,6 @@ impl AuthSettings {
     }
 }
 
-pub async fn refresh_config_if_needed(app_config: &AppConfig, config: Config) -> Result<Config> {
-    if !token_needs_refresh(config.expires_at)? {
-        return Ok(config);
-    }
-
-    let settings = AuthSettings::from_env()?;
-    let current_refresh_token = config.refresh_token.clone();
-    let token = settings.refresh_access_token(&current_refresh_token).await?;
-
-    let refreshed = Config {
-        access_token: token.access_token,
-        refresh_token: if token.refresh_token.is_empty() {
-            config.refresh_token
-        } else {
-            token.refresh_token
-        },
-        expires_at: token.expires_at,
-    };
-
-    app_config.save(&refreshed)?;
-    Ok(refreshed)
-}
-
 fn required_env<F>(get_var: &F, key: &str) -> Result<String>
 where
     F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
@@ -155,10 +130,6 @@ where
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn token_needs_refresh(expires_at: i64) -> Result<bool> {
-    Ok(expires_at <= unix_timestamp()? + REFRESH_MARGIN_SECS)
 }
 
 fn unix_timestamp() -> Result<i64> {
@@ -250,13 +221,7 @@ impl TickTickOAuth {
             redirect_uri,
         };
 
-        send_broker_token_request(
-            broker_url,
-            "/v1/oauth/exchange",
-            &payload,
-            broker_api_key,
-        )
-        .await
+        send_broker_token_request(broker_url, "/v1/oauth/exchange", &payload, broker_api_key).await
     }
 
     pub async fn refresh_access_token_via_broker(
@@ -268,13 +233,7 @@ impl TickTickOAuth {
             refresh_token: refresh_token.to_string(),
         };
 
-        send_broker_token_request(
-            broker_url,
-            "/v1/oauth/refresh",
-            &payload,
-            broker_api_key,
-        )
-        .await
+        send_broker_token_request(broker_url, "/v1/oauth/refresh", &payload, broker_api_key).await
     }
 }
 

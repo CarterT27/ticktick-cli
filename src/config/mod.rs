@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
@@ -129,13 +129,6 @@ impl AppConfig {
         }
 
         Ok(())
-    }
-
-    pub async fn load_authenticated(&self) -> Result<Config> {
-        let config = self
-            .load()?
-            .ok_or_else(|| anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-        auth::refresh_config_if_needed(self, config).await
     }
 
     pub fn config_file_path(&self) -> &PathBuf {
