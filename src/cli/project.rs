@@ -135,6 +135,8 @@ pub struct ProjectUpdateArgs {
     kind: Option<String>,
     #[arg(long)]
     sort_order: Option<i64>,
+    #[arg(long, default_value = "human")]
+    output: OutputFormat,
 }
 
 pub async fn project_update(args: ProjectUpdateArgs) -> Result<()> {
@@ -152,7 +154,7 @@ pub async fn project_update(args: ProjectUpdateArgs) -> Result<()> {
     if let Some(cache) = cache.as_ref() {
         let _ = cache.invalidate_projects();
     }
-    println!("Project updated: {}", updated.name);
+    print!("{}", format_project_update_output(&updated, args.output)?);
     Ok(())
 }
 
@@ -161,9 +163,16 @@ pub struct ProjectDeleteArgs {
     project_id: String,
     #[arg(long, default_value = "true")]
     confirm: bool,
+    #[arg(long, default_value = "human")]
+    output: OutputFormat,
 }
 
 pub async fn project_delete(args: ProjectDeleteArgs) -> Result<()> {
+    let ProjectDeleteArgs {
+        project_id,
+        confirm,
+        output,
+    } = args;
     let app_config = AppConfig::new()?;
     let config = app_config
         .load()?
@@ -171,18 +180,21 @@ pub async fn project_delete(args: ProjectDeleteArgs) -> Result<()> {
     let client = TickTickClient::new(config)?;
     let cache = cache_store();
 
-    if !args.confirm {
-        client.delete_project(&args.project_id).await?;
+    if !confirm {
+        client.delete_project(&project_id).await?;
         if let Some(cache) = cache.as_ref() {
             let _ = cache.invalidate_projects();
         }
-        println!("Project deleted: {}", args.project_id);
+        print!(
+            "{}",
+            format_project_delete_output(&project_id, None, output)?
+        );
         return Ok(());
     }
 
-    let project = client.get_project(&args.project_id).await?;
+    let project = client.get_project(&project_id).await?;
 
-    if args.confirm {
+    if confirm {
         println!(
             "Are you sure you want to delete project '{}'? [y/N]",
             project.name
@@ -195,11 +207,14 @@ pub async fn project_delete(args: ProjectDeleteArgs) -> Result<()> {
         }
     }
 
-    client.delete_project(&args.project_id).await?;
+    client.delete_project(&project_id).await?;
     if let Some(cache) = cache.as_ref() {
         let _ = cache.invalidate_projects();
     }
-    println!("Project deleted: {}", project.name);
+    print!(
+        "{}",
+        format_project_delete_output(&project_id, Some(project.name.as_str()), output)?
+    );
     Ok(())
 }
 
@@ -240,6 +255,34 @@ fn format_project_detail_output(project: &Project, format: OutputFormat) -> Resu
             project.name,
             project.id.clone().unwrap_or_default()
         )),
+    }
+}
+
+fn format_project_update_output(project: &Project, format: OutputFormat) -> Result<String> {
+    match format {
+        OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(project)?)),
+        OutputFormat::Human => Ok(format!("Project updated: {}\n", project.name)),
+    }
+}
+
+fn format_project_delete_output(
+    project_id: &str,
+    project_name: Option<&str>,
+    format: OutputFormat,
+) -> Result<String> {
+    match format {
+        OutputFormat::Json => Ok(format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "deleted",
+                "projectId": project_id,
+                "name": project_name,
+            }))?
+        )),
+        OutputFormat::Human => Ok(match project_name {
+            Some(project_name) => format!("Project deleted: {}\n", project_name),
+            None => format!("Project deleted: {}\n", project_id),
+        }),
     }
 }
 
@@ -342,6 +385,15 @@ mod tests {
 
         let detail_json = format_project_detail_output(&project, OutputFormat::Json).unwrap();
         assert!(detail_json.contains("\"name\": \"Inbox\""));
+
+        let updated = format_project_update_output(&project, OutputFormat::Human).unwrap();
+        assert!(updated.contains("Project updated: Inbox"));
+
+        let deleted =
+            format_project_delete_output("project-1", Some("Inbox"), OutputFormat::Json).unwrap();
+        assert!(deleted.contains("\"status\": \"deleted\""));
+        assert!(deleted.contains("\"projectId\": \"project-1\""));
+        assert!(deleted.contains("\"name\": \"Inbox\""));
     }
 
     #[test]
@@ -376,6 +428,7 @@ mod tests {
             view_mode: Some("kanban".to_string()),
             kind: Some("TASK".to_string()),
             sort_order: Some(7),
+            output: OutputFormat::Human,
         };
 
         apply_project_update_args(&mut project, &args);
