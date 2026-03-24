@@ -405,6 +405,29 @@ fn merge_tags(existing: &mut Vec<String>, extras: Vec<String>) {
     }
 }
 
+fn resolve_task_note_fields(
+    content: Option<String>,
+    desc: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match (content, desc) {
+        (Some(content), Some(desc)) => (Some(content), Some(desc)),
+        (Some(value), None) | (None, Some(value)) => (Some(value.clone()), Some(value)),
+        (None, None) => (None, None),
+    }
+}
+
+fn sync_task_note_fields(task: &mut Task) {
+    match (&task.content, &task.desc) {
+        (Some(content), None) => {
+            task.desc = Some(content.clone());
+        }
+        (None, Some(desc)) => {
+            task.content = Some(desc.clone());
+        }
+        _ => {}
+    }
+}
+
 fn task_has_all_tags(task: &Task, required_tags: &[String]) -> bool {
     let Some(task_tags) = task.tags.as_ref() else {
         return false;
@@ -941,11 +964,13 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
             None => infer_default_project_id(&client, cache.as_ref()).await?,
         };
 
+    let (content, desc) = resolve_task_note_fields(args.content, args.desc);
+
     let task = crate::models::Task {
         id: None,
         title,
-        content: args.content,
-        desc: args.desc,
+        content,
+        desc,
         project_id: Some(project_id.clone()),
         start_date: args.start_date,
         due_date: args.due_date,
@@ -967,6 +992,8 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
         kind: Some("TASK".to_string()),
         ..Default::default()
     };
+    let mut task = task;
+    sync_task_note_fields(&mut task);
 
     let created = client.create_task(&task).await?;
     remember_task(cache.as_ref(), &created, Some(&project_id));
@@ -1185,10 +1212,12 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
     if let Some(title) = args.title {
         task.title = title;
     }
-    if let Some(content) = args.content {
+    let note_fields_were_updated = args.content.is_some() || args.desc.is_some();
+    let (content, desc) = resolve_task_note_fields(args.content, args.desc);
+    if let Some(content) = content {
         task.content = Some(content);
     }
-    if let Some(desc) = args.desc {
+    if let Some(desc) = desc {
         task.desc = Some(desc);
     }
     if let Some(start_date) = args.start_date {
@@ -1211,6 +1240,16 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
     }
     if let Some(sort_order) = args.sort_order {
         task.sort_order = Some(sort_order);
+    }
+    if note_fields_were_updated {
+        if task.content.is_none() {
+            task.content = task.desc.clone();
+        }
+        if task.desc.is_none() {
+            task.desc = task.content.clone();
+        }
+    } else {
+        sync_task_note_fields(&mut task);
     }
 
     let updated = client.update_task(&args.task_id, &task).await?;
@@ -1737,5 +1776,73 @@ mod tests {
     fn make_task_helper_sets_priority() {
         let task = make_task(Some("2026-03-01"), None, None, Some(3));
         assert_eq!(task.priority, Some(3));
+    }
+
+    #[test]
+    fn syncs_desc_into_content_when_content_missing() {
+        let mut task = Task {
+            title: "sample".to_string(),
+            desc: Some("details".to_string()),
+            ..Default::default()
+        };
+
+        sync_task_note_fields(&mut task);
+
+        assert_eq!(task.content.as_deref(), Some("details"));
+        assert_eq!(task.desc.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn syncs_content_into_desc_when_desc_missing() {
+        let mut task = Task {
+            title: "sample".to_string(),
+            content: Some("details".to_string()),
+            ..Default::default()
+        };
+
+        sync_task_note_fields(&mut task);
+
+        assert_eq!(task.content.as_deref(), Some("details"));
+        assert_eq!(task.desc.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn preserves_distinct_note_fields_when_both_exist() {
+        let mut task = Task {
+            title: "sample".to_string(),
+            content: Some("content".to_string()),
+            desc: Some("desc".to_string()),
+            ..Default::default()
+        };
+
+        sync_task_note_fields(&mut task);
+
+        assert_eq!(task.content.as_deref(), Some("content"));
+        assert_eq!(task.desc.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn resolve_task_note_fields_mirrors_desc_when_content_not_provided() {
+        let (content, desc) = resolve_task_note_fields(None, Some("details".to_string()));
+
+        assert_eq!(content.as_deref(), Some("details"));
+        assert_eq!(desc.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn resolve_task_note_fields_mirrors_content_when_desc_not_provided() {
+        let (content, desc) = resolve_task_note_fields(Some("details".to_string()), None);
+
+        assert_eq!(content.as_deref(), Some("details"));
+        assert_eq!(desc.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn resolve_task_note_fields_preserves_distinct_explicit_values() {
+        let (content, desc) =
+            resolve_task_note_fields(Some("content".to_string()), Some("desc".to_string()));
+
+        assert_eq!(content.as_deref(), Some("content"));
+        assert_eq!(desc.as_deref(), Some("desc"));
     }
 }

@@ -15,6 +15,45 @@ trait Tabular {
     fn rows(&self) -> Vec<String>;
 }
 
+fn task_date_cell(task: &Task) -> String {
+    task.due_date
+        .as_ref()
+        .or(task.start_date.as_ref())
+        .map(|date| date.split('T').next().unwrap_or(date).to_string())
+        .unwrap_or_default()
+}
+
+fn truncate_preview(value: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    let mut chars = value.chars().peekable();
+
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return preview;
+        };
+        preview.push(ch);
+    }
+
+    if chars.peek().is_some() {
+        preview.push_str("...");
+    }
+
+    preview
+}
+
+fn task_note_cell(task: &Task) -> String {
+    task.content
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            task.desc
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .map(|value| truncate_preview(&value.replace('\n', " "), 40))
+        .unwrap_or_default()
+}
+
 impl Tabular for Task {
     fn headers() -> Vec<String> {
         vec![
@@ -22,6 +61,7 @@ impl Tabular for Task {
             "Title".to_string(),
             "Priority".to_string(),
             "Due".to_string(),
+            "Note".to_string(),
         ]
     }
 
@@ -33,14 +73,15 @@ impl Tabular for Task {
             5 => "High".to_string(),
             p => p.to_string(),
         };
-        let due = self
-            .due_date
-            .as_ref()
-            .map(|d| d.split('T').next().unwrap_or(d).to_string())
-            .unwrap_or_default();
         let id = self.id.clone().unwrap_or_default();
 
-        vec![id, self.title.clone(), priority, due]
+        vec![
+            id,
+            self.title.clone(),
+            priority,
+            task_date_cell(self),
+            task_note_cell(self),
+        ]
     }
 }
 
@@ -223,8 +264,51 @@ mod tests {
                 "Ship release".to_string(),
                 "High".to_string(),
                 "2026-03-08".to_string(),
+                "".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn task_rows_fall_back_to_start_date_and_note_preview() {
+        let task = Task {
+            title: "Review notes".to_string(),
+            start_date: Some("2026-03-09T00:00:00.000+0000".to_string()),
+            content: Some(
+                "This is a long note that should be truncated once it exceeds the preview width."
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            task.rows(),
+            vec![
+                "".to_string(),
+                "Review notes".to_string(),
+                "".to_string(),
+                "2026-03-09".to_string(),
+                "This is a long note that should be trunc...".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn task_note_prefers_content_then_desc() {
+        let with_desc_only = Task {
+            title: "One".to_string(),
+            desc: Some("Description".to_string()),
+            ..Default::default()
+        };
+        let with_both = Task {
+            title: "Two".to_string(),
+            content: Some("Content".to_string()),
+            desc: Some("Description".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(task_note_cell(&with_desc_only), "Description");
+        assert_eq!(task_note_cell(&with_both), "Content");
     }
 
     #[test]
