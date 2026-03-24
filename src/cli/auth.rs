@@ -59,8 +59,9 @@ pub async fn login() -> Result<()> {
     }
 
     println!("Successfully authenticated!");
+    println!("Credentials stored in your system keychain.");
     println!(
-        "Credentials stored in {}",
+        "Session metadata stored in {}",
         app_config.config_file_path().display()
     );
     Ok(())
