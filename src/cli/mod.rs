@@ -1,4 +1,5 @@
 mod auth;
+mod bootstrap;
 mod project;
 mod task;
 

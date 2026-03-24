@@ -1,8 +1,8 @@
 use anyhow::Result;
 use oauth2::{
     basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
-    ClientSecret, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
-    TokenResponse, TokenUrl,
+    ClientSecret, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, Scope,
+    TokenResponse, TokenType, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
@@ -59,22 +59,17 @@ impl TickTickOAuth {
             .request_async(async_http_client)
             .await?;
 
-        let expires_at = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs() as i64
-            + token
-                .expires_in()
-                .unwrap_or(Duration::from_secs(3600))
-                .as_secs() as i64;
+        token_response_data(&token)
+    }
 
-        Ok(TokenResponseData {
-            access_token: token.access_token().secret().to_string(),
-            refresh_token: token
-                .refresh_token()
-                .map(|t| t.secret().to_string())
-                .unwrap_or_default(),
-            expires_at,
-        })
+    pub async fn refresh_access_token(&self, refresh_token: &str) -> Result<TokenResponseData> {
+        let token = self
+            .client
+            .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+            .request_async(async_http_client)
+            .await?;
+
+        token_response_data(&token)
     }
 }
 
@@ -83,6 +78,29 @@ pub struct TokenResponseData {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: i64,
+}
+
+fn token_response_data<T, TT>(token: &T) -> Result<TokenResponseData>
+where
+    T: TokenResponse<TT>,
+    TT: TokenType,
+{
+    let expires_at = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_secs() as i64
+        + token
+            .expires_in()
+            .unwrap_or(Duration::from_secs(3600))
+            .as_secs() as i64;
+
+    Ok(TokenResponseData {
+        access_token: token.access_token().secret().to_string(),
+        refresh_token: token
+            .refresh_token()
+            .map(|t| t.secret().to_string())
+            .unwrap_or_default(),
+        expires_at,
+    })
 }
 
 #[cfg(test)]

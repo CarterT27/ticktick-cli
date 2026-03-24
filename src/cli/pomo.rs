@@ -1,5 +1,4 @@
-use crate::api::TickTickClient;
-use crate::config::AppConfig;
+use super::bootstrap::authenticated_client;
 use crate::output::{print_pomodoros, OutputFormat};
 use anyhow::Result;
 use chrono::Utc;
@@ -24,11 +23,7 @@ pub struct PomoStartArgs {
 }
 
 pub async fn pomo_start(args: PomoStartArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let pomodoro = crate::models::Pomo {
         id: Some(Uuid::new_v4().to_string()),
@@ -68,11 +63,7 @@ pub struct PomoStopArgs {
 }
 
 pub async fn pomo_stop(args: PomoStopArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let stopped = client.pomodoros_stop(&args.pomo_id, &args.task_id).await?;
 
@@ -103,11 +94,7 @@ pub struct PomoHistoryArgs {
 }
 
 pub async fn pomo_history(args: PomoHistoryArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let mut pomodoros = client.pomodoros_history(args.task_id).await?;
     pomodoros = pomodoros.into_iter().take(args.limit).collect();

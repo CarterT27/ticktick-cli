@@ -1,9 +1,12 @@
-use crate::config::Config;
+use crate::config::auth::TickTickOAuth;
+use crate::config::{AppConfig, Config};
 use crate::models::{Column, Project, ProjectData, Task};
 use anyhow::{anyhow, Context, Result};
-use reqwest::{header, Client, Response};
+use reqwest::{header, Client, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASE_URL: &str = "https://api.ticktick.com/open/v1";
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -21,7 +24,8 @@ struct InboxProjectData {
 #[derive(Debug, Clone)]
 pub struct TickTickClient {
     client: Client,
-    config: Config,
+    config: Arc<Mutex<Config>>,
+    app_config: AppConfig,
 }
 
 impl TickTickClient {
@@ -31,7 +35,11 @@ impl TickTickClient {
             .build()
             .context("Failed to build HTTP client")?;
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config: Arc::new(Mutex::new(config)),
+            app_config: AppConfig::new()?,
+        })
     }
 
     async fn request(
@@ -41,35 +49,16 @@ impl TickTickClient {
         body: Option<serde_json::Value>,
     ) -> Result<Response> {
         validate_http_method(method)?;
-        let url = build_url(endpoint);
-        let mut request = match method {
-            "GET" => self.client.get(&url),
-            "POST" => self.client.post(&url),
-            "PUT" => self.client.put(&url),
-            "DELETE" => self.client.delete(&url),
-            _ => unreachable!("validate_http_method rejects unsupported methods"),
-        };
+        self.refresh_access_token_if_needed().await?;
 
-        request = request
-            .header(
-                header::AUTHORIZATION,
-                bearer_token_value(&self.config.access_token),
-            )
-            .header(header::CONTENT_TYPE, "application/json");
-
-        if let Some(body) = body {
-            request = request.json(&body);
+        let response = self.send_request(method, endpoint, body.as_ref()).await?;
+        if should_refresh_after_response(response.status()) {
+            self.refresh_access_token().await?;
+            let retry_response = self.send_request(method, endpoint, body.as_ref()).await?;
+            return response_to_result(retry_response).await;
         }
 
-        let response = request.send().await.context("Failed to send request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Request failed: {} - {}", status, body_text));
-        }
-
-        Ok(response)
+        response_to_result(response).await
     }
 
     pub async fn get_projects(&self) -> Result<Vec<Project>> {
@@ -159,6 +148,88 @@ impl TickTickClient {
         self.request("DELETE", &endpoint, None).await?;
         Ok(())
     }
+
+    async fn send_request(
+        &self,
+        method: &str,
+        endpoint: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Response> {
+        let url = build_url(endpoint);
+        let access_token = self.access_token()?;
+        let mut request = match method {
+            "GET" => self.client.get(&url),
+            "POST" => self.client.post(&url),
+            "PUT" => self.client.put(&url),
+            "DELETE" => self.client.delete(&url),
+            _ => unreachable!("validate_http_method rejects unsupported methods"),
+        };
+
+        request = request
+            .header(header::AUTHORIZATION, bearer_token_value(&access_token))
+            .header(header::CONTENT_TYPE, "application/json");
+
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+
+        request.send().await.context("Failed to send request")
+    }
+
+    async fn refresh_access_token_if_needed(&self) -> Result<()> {
+        if self
+            .config_snapshot()?
+            .is_access_token_expired(current_timestamp()?)
+        {
+            self.refresh_access_token().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_access_token(&self) -> Result<()> {
+        let current_config = self.config_snapshot()?;
+        if current_config.refresh_token.is_empty() {
+            return Err(anyhow!(
+                "Access token cannot be refreshed because no refresh token is available. Run 'tt auth login' first."
+            ));
+        }
+
+        let oauth = oauth_client_from_env()?;
+        let refreshed = oauth
+            .refresh_access_token(&current_config.refresh_token)
+            .await
+            .context("Failed to refresh access token")?;
+
+        let mut updated_config = current_config;
+        updated_config.update_tokens(
+            refreshed.access_token,
+            refreshed.refresh_token,
+            refreshed.expires_at,
+        );
+
+        self.app_config
+            .save(&updated_config)
+            .context("Failed to persist refreshed credentials")?;
+
+        let mut config = self.lock_config()?;
+        *config = updated_config;
+        Ok(())
+    }
+
+    fn access_token(&self) -> Result<String> {
+        Ok(self.lock_config()?.access_token.clone())
+    }
+
+    fn config_snapshot(&self) -> Result<Config> {
+        Ok(self.lock_config()?.clone())
+    }
+
+    fn lock_config(&self) -> Result<std::sync::MutexGuard<'_, Config>> {
+        self.config
+            .lock()
+            .map_err(|_| anyhow!("Authentication state is unavailable"))
+    }
 }
 
 fn inbox_tasks_from_data(data: InboxProjectData) -> Vec<Task> {
@@ -178,6 +249,35 @@ fn build_url(endpoint: &str) -> String {
 
 fn bearer_token_value(access_token: &str) -> String {
     format!("Bearer {}", access_token)
+}
+
+fn oauth_client_from_env() -> Result<TickTickOAuth> {
+    let client_id =
+        std::env::var("TICKTICK_CLIENT_ID").map_err(|_| anyhow!("Missing TICKTICK_CLIENT_ID"))?;
+    let client_secret = std::env::var("TICKTICK_CLIENT_SECRET")
+        .map_err(|_| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?;
+    let redirect_uri = std::env::var("TICKTICK_REDIRECT_URI")
+        .unwrap_or_else(|_| "http://localhost:8080/callback".to_string());
+
+    TickTickOAuth::new(client_id, client_secret, redirect_uri)
+}
+
+async fn response_to_result(response: Response) -> Result<Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    Err(anyhow!("Request failed: {} - {}", status, body_text))
+}
+
+fn current_timestamp() -> Result<i64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64)
+}
+
+fn should_refresh_after_response(status: StatusCode) -> bool {
+    status == StatusCode::UNAUTHORIZED
 }
 
 #[cfg(test)]
@@ -230,5 +330,17 @@ mod tests {
     #[test]
     fn bearer_token_value_formats_authorization_header() {
         assert_eq!(bearer_token_value("abc123"), "Bearer abc123");
+    }
+
+    #[test]
+    fn should_refresh_after_response_only_for_401() {
+        assert!(should_refresh_after_response(StatusCode::UNAUTHORIZED));
+        assert!(!should_refresh_after_response(StatusCode::OK));
+        assert!(!should_refresh_after_response(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn current_timestamp_returns_unix_seconds() {
+        assert!(current_timestamp().unwrap() > 0);
     }
 }
