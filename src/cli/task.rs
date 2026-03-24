@@ -5,7 +5,9 @@ use crate::models::{Task, TaskStatus};
 use crate::output::{print_tasks, OutputFormat};
 use anyhow::{anyhow, Result};
 use atty::Stream;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
+use chrono::{
+    DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday,
+};
 use clap::{Args, Subcommand};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -89,6 +91,22 @@ fn parse_priority_shorthand(token: &str) -> Option<i32> {
         "low" => Some(1),
         "none" | "normal" => Some(0),
         _ => None,
+    }
+}
+
+fn parse_priority_value(value: &str) -> std::result::Result<i32, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "none" | "normal" => Ok(0),
+        "low" => Ok(1),
+        "medium" => Ok(3),
+        "high" => Ok(5),
+        _ => value.trim().parse::<i32>().map_err(|_| {
+            format!(
+                "Invalid priority '{}'. Use an integer or one of: none, low, medium, high.",
+                value
+            )
+        }),
     }
 }
 
@@ -395,6 +413,61 @@ fn format_ticktick_due_date(date: NaiveDate) -> Option<String> {
         .or_else(|| Local.from_local_datetime(&local_midnight).latest())?;
     let utc_dt = local_dt.with_timezone(&Utc);
     Some(utc_dt.format("%Y-%m-%dT%H:%M:%S%.3f+0000").to_string())
+}
+
+fn format_ticktick_datetime<Tz: TimeZone>(dt: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    dt.with_timezone(&Utc)
+        .format("%Y-%m-%dT%H:%M:%S%.3f+0000")
+        .to_string()
+}
+
+fn parse_local_datetime(value: &str, format: &str) -> Option<String> {
+    let naive = NaiveDateTime::parse_from_str(value, format).ok()?;
+    let local = Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .or_else(|| Local.from_local_datetime(&naive).latest())?;
+    Some(format_ticktick_datetime(local))
+}
+
+fn normalize_task_datetime_input(value: &str) -> std::result::Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Date value cannot be empty.".to_string());
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return format_ticktick_due_date(date).ok_or_else(|| {
+            format!(
+                "Failed to format date '{}'. Use YYYY-MM-DD or ISO 8601.",
+                value
+            )
+        });
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(format_ticktick_datetime(dt));
+    }
+
+    for format in ["%Y-%m-%dT%H:%M:%S%.f%z", "%Y-%m-%dT%H:%M:%S%z"] {
+        if let Ok(dt) = DateTime::parse_from_str(trimmed, format) {
+            return Ok(format_ticktick_datetime(dt));
+        }
+    }
+
+    for format in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"] {
+        if let Some(dt) = parse_local_datetime(trimmed, format) {
+            return Ok(dt);
+        }
+    }
+
+    Err(format!(
+        "Invalid date '{}'. Use YYYY-MM-DD or ISO 8601 like 2026-03-26T00:00:00+0000.",
+        value
+    ))
 }
 
 fn merge_tags(existing: &mut Vec<String>, extras: Vec<String>) {
@@ -878,23 +951,26 @@ async fn resolve_task_project_id(
 #[derive(Args)]
 pub struct TaskAddArgs {
     title: Vec<String>,
-    #[arg(long)]
+    #[arg(long, help = "Visible task note shown in TickTick")]
     content: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Secondary TickTick API description field; mirrored to content when used alone"
+    )]
     desc: Option<String>,
     #[arg(long)]
     project_id: Option<String>,
     #[arg(long)]
     list: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = normalize_task_datetime_input)]
     start_date: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = normalize_task_datetime_input)]
     due_date: Option<String>,
     #[arg(long)]
     time_zone: Option<String>,
     #[arg(long)]
     all_day: Option<bool>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_priority_value)]
     priority: Option<i32>,
     #[arg(long)]
     tags: Vec<String>,
@@ -1019,7 +1095,7 @@ pub struct TaskListArgs {
     list: Option<String>,
     #[arg(long)]
     status: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_priority_value)]
     priority: Option<i32>,
     #[arg(long)]
     tags: Vec<String>,
@@ -1158,17 +1234,20 @@ pub struct TaskUpdateArgs {
     list: Option<String>,
     #[arg(long)]
     title: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Visible task note shown in TickTick")]
     content: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Secondary TickTick API description field; mirrored to content when used alone"
+    )]
     desc: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = normalize_task_datetime_input)]
     start_date: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = normalize_task_datetime_input)]
     due_date: Option<String>,
     #[arg(long)]
     time_zone: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_priority_value)]
     priority: Option<i32>,
     #[arg(long)]
     reminders: Vec<String>,
@@ -1413,6 +1492,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_priority_values_from_aliases_and_numbers() {
+        assert_eq!(parse_priority_value("high"), Ok(5));
+        assert_eq!(parse_priority_value("Medium"), Ok(3));
+        assert_eq!(parse_priority_value("0"), Ok(0));
+        assert_eq!(parse_priority_value("4"), Ok(4));
+    }
+
+    #[test]
+    fn rejects_invalid_priority_values_with_actionable_message() {
+        let err = parse_priority_value("urgent").unwrap_err();
+        assert!(err.contains("Invalid priority"));
+        assert!(err.contains("none, low, medium, high"));
+    }
+
+    #[test]
     fn parses_when_tokens() {
         assert_eq!(parse_when_token("today"), Some(TaskWhenFilter::Today));
         assert_eq!(parse_when_token("tomorrow"), Some(TaskWhenFilter::Tomorrow));
@@ -1529,6 +1623,32 @@ mod tests {
         let value = format_ticktick_due_date(date).unwrap();
         assert!(DateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S%.f%z").is_ok());
         assert!(value.ends_with("+0000"));
+    }
+
+    #[test]
+    fn normalizes_short_date_input_for_api_submission() {
+        let value = normalize_task_datetime_input("2026-03-26").unwrap();
+        assert_eq!(
+            parse_task_date(&value),
+            Some(NaiveDate::from_ymd_opt(2026, 3, 26).unwrap())
+        );
+    }
+
+    #[test]
+    fn normalizes_iso_datetime_input_for_api_submission() {
+        let value = normalize_task_datetime_input("2026-03-26T12:30:00+00:00").unwrap();
+        assert!(DateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S%.f%z").is_ok());
+        assert_eq!(
+            parse_task_date(&value),
+            Some(NaiveDate::from_ymd_opt(2026, 3, 26).unwrap())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_datetime_input_with_actionable_message() {
+        let err = normalize_task_datetime_input("march sometime").unwrap_err();
+        assert!(err.contains("Invalid date"));
+        assert!(err.contains("YYYY-MM-DD"));
     }
 
     #[test]
