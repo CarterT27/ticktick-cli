@@ -25,6 +25,7 @@ use anyhow::{anyhow, Result};
 use atty::Stream;
 use chrono::Local;
 use clap::{Args, Subcommand};
+use iana_time_zone::get_timezone;
 use serde_json::Value;
 use std::io::{self, Read};
 
@@ -67,6 +68,18 @@ fn sync_task_note_fields(task: &mut Task) {
 
 fn task_is_completed(task: &Task) -> bool {
     matches!(task.status, Some(TaskStatus::Completed))
+}
+
+fn apply_system_time_zone_default(task: &mut Task) -> Result<()> {
+    if task.time_zone.is_some() || (task.start_date.is_none() && task.due_date.is_none()) {
+        return Ok(());
+    }
+
+    task.time_zone = Some(
+        get_timezone().map_err(|err| anyhow!("Failed to determine system timezone: {}", err))?,
+    );
+
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -198,6 +211,7 @@ pub async fn task_add(args: TaskAddArgs) -> Result<()> {
     };
     let mut task = task;
     sync_task_note_fields(&mut task);
+    apply_system_time_zone_default(&mut task)?;
 
     let created = client.create_task(&task).await?;
     remember_task(cache.as_ref(), &created, Some(&project_id));
@@ -546,6 +560,9 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
     }
     if let Some(sort_order) = sort_order {
         task.sort_order = Some(sort_order);
+    }
+    if !clear_time_zone {
+        apply_system_time_zone_default(&mut task)?;
     }
     if note_fields_were_updated {
         if task.content.is_none() {
