@@ -33,7 +33,7 @@ keyring = { version = "3.6.2", features = ["apple-native"] }
 keyring = { version = "3.6.2", features = ["windows-native"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
-keyring = { version = "3.6.2", features = ["sync-secret-service", "crypto-rust"] }
+keyring = { version = "3.6.2", features = ["linux-native"] }
 
 [dev-dependencies]
 assert_cmd = "2.0"
