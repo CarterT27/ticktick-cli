@@ -71,15 +71,15 @@ impl AppConfig {
 mod tests {
     use super::*;
     use std::env;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_config_path() -> PathBuf {
         let dir = env::temp_dir().join(format!(
-            "ticktick-cli-config-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "ticktick-cli-config-test-{}-{}",
+            std::process::id(),
+            TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
         dir.join("config.toml")
