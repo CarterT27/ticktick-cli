@@ -1,5 +1,5 @@
 use super::dates::TaskWhenFilter;
-use crate::models::Task;
+use crate::models::{Task, TaskStatus};
 
 #[derive(Default)]
 pub(super) struct ShorthandFilters {
@@ -34,6 +34,17 @@ pub(super) fn parse_priority_value(value: &str) -> std::result::Result<i32, Stri
                 value
             )
         }),
+    }
+}
+
+pub(super) fn parse_task_status_value(value: &str) -> std::result::Result<TaskStatus, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "done" | "completed" => Ok(TaskStatus::Completed),
+        "todo" | "open" => Ok(TaskStatus::Normal),
+        _ => Err(format!(
+            "Unsupported status '{}'. Use one of: done, completed, todo, open",
+            value
+        )),
     }
 }
 

@@ -11,7 +11,7 @@ use self::dates::{
 };
 use self::filters::{
     extract_implicit_list_from_terms, is_inbox_list_name, merge_tags, parse_priority_value,
-    parse_shorthand, parse_task_add_shorthand, task_has_all_tags,
+    parse_shorthand, parse_task_add_shorthand, parse_task_status_value, task_has_all_tags,
 };
 use self::projects::{
     cache_store, forget_task_project_id, get_tasks_across_projects, get_tasks_for_project,
@@ -25,6 +25,7 @@ use anyhow::{anyhow, Result};
 use atty::Stream;
 use chrono::Local;
 use clap::{Args, Subcommand};
+use serde_json::Value;
 use std::io::{self, Read};
 
 #[derive(Subcommand)]
@@ -66,6 +67,17 @@ fn sync_task_note_fields(task: &mut Task) {
 
 fn task_is_completed(task: &Task) -> bool {
     matches!(task.status, Some(TaskStatus::Completed))
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct TaskUpdateClearFlags {
+    start_date: bool,
+    due_date: bool,
+    time_zone: bool,
+    tags: bool,
+    reminders: bool,
+    repeat_flag: bool,
+    sort_order: bool,
 }
 
 #[derive(Args)]
@@ -328,7 +340,7 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Args)]
+#[derive(Debug, Args)]
 pub struct TaskUpdateArgs {
     task_id: String,
     #[arg(long)]
@@ -344,79 +356,195 @@ pub struct TaskUpdateArgs {
         help = "Secondary TickTick API description field; mirrored to content when used alone"
     )]
     desc: Option<String>,
-    #[arg(long, value_parser = normalize_task_datetime_input)]
+    #[arg(
+        long,
+        value_parser = normalize_task_datetime_input,
+        conflicts_with = "clear_start_date"
+    )]
     start_date: Option<String>,
-    #[arg(long, value_parser = normalize_task_datetime_input)]
+    #[arg(
+        long,
+        value_parser = normalize_task_datetime_input,
+        conflicts_with = "clear_due_date"
+    )]
     due_date: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "clear_time_zone")]
     time_zone: Option<String>,
+    #[arg(long)]
+    all_day: Option<bool>,
     #[arg(long, value_parser = parse_priority_value)]
     priority: Option<i32>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "clear_tags")]
+    tags: Vec<String>,
+    #[arg(long, conflicts_with = "clear_reminders")]
     reminders: Vec<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_task_status_value)]
+    status: Option<TaskStatus>,
+    #[arg(long, conflicts_with = "clear_repeat_flag")]
     repeat_flag: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "clear_sort_order")]
     sort_order: Option<i64>,
+    #[arg(long)]
+    clear_start_date: bool,
+    #[arg(long)]
+    clear_due_date: bool,
+    #[arg(long)]
+    clear_time_zone: bool,
+    #[arg(long)]
+    clear_tags: bool,
+    #[arg(long)]
+    clear_reminders: bool,
+    #[arg(long)]
+    clear_repeat_flag: bool,
+    #[arg(long)]
+    clear_sort_order: bool,
     #[arg(long, default_value = "human")]
     output: OutputFormat,
 }
 
+fn build_task_update_payload(task: &Task, clear_flags: TaskUpdateClearFlags) -> Result<Value> {
+    let mut payload = serde_json::to_value(task)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Failed to encode task update payload as JSON object"))?;
+
+    if clear_flags.start_date {
+        object.insert("startDate".to_string(), Value::Null);
+    }
+    if clear_flags.due_date {
+        object.insert("dueDate".to_string(), Value::Null);
+    }
+    if clear_flags.time_zone {
+        object.insert("timeZone".to_string(), Value::Null);
+    }
+    if clear_flags.tags {
+        object.insert("tags".to_string(), Value::Array(Vec::new()));
+    }
+    if clear_flags.reminders {
+        object.insert("reminders".to_string(), Value::Array(Vec::new()));
+    }
+    if clear_flags.repeat_flag {
+        object.insert("repeatFlag".to_string(), Value::Null);
+    }
+    if clear_flags.sort_order {
+        object.insert("sortOrder".to_string(), Value::Null);
+    }
+
+    Ok(payload)
+}
+
 pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
+    let TaskUpdateArgs {
+        task_id,
+        project_id,
+        list,
+        title,
+        content,
+        desc,
+        start_date,
+        due_date,
+        time_zone,
+        all_day,
+        priority,
+        tags,
+        reminders,
+        status,
+        repeat_flag,
+        sort_order,
+        clear_start_date,
+        clear_due_date,
+        clear_time_zone,
+        clear_tags,
+        clear_reminders,
+        clear_repeat_flag,
+        clear_sort_order,
+        output,
+    } = args;
+
     let client = authenticated_client()?;
     let cache = cache_store();
-    let explicit_scope = args.project_id.is_some() || args.list.is_some();
+    let explicit_scope = project_id.is_some() || list.is_some();
 
     let mut resolved = resolve_task_project_id(
         &client,
         cache.as_ref(),
-        &args.task_id,
-        args.project_id.clone(),
-        args.list.clone(),
+        &task_id,
+        project_id.clone(),
+        list.clone(),
     )
     .await?;
 
-    let mut task = match client.get_task(&resolved.project_id, &args.task_id).await {
+    let mut task = match client.get_task(&resolved.project_id, &task_id).await {
         Ok(task) => task,
         Err(_) if resolved.from_cache && !explicit_scope => {
-            forget_task_project_id(cache.as_ref(), &args.task_id);
+            forget_task_project_id(cache.as_ref(), &task_id);
             resolved =
-                resolve_task_project_id(&client, cache.as_ref(), &args.task_id, None, None).await?;
-            client.get_task(&resolved.project_id, &args.task_id).await?
+                resolve_task_project_id(&client, cache.as_ref(), &task_id, None, None).await?;
+            client.get_task(&resolved.project_id, &task_id).await?
         }
         Err(err) => return Err(err),
     };
 
-    if let Some(title) = args.title {
+    if let Some(title) = title {
         task.title = title;
     }
-    let note_fields_were_updated = args.content.is_some() || args.desc.is_some();
-    let (content, desc) = resolve_task_note_fields(args.content, args.desc);
+    let note_fields_were_updated = content.is_some() || desc.is_some();
+    let (content, desc) = resolve_task_note_fields(content, desc);
     if let Some(content) = content {
         task.content = Some(content);
     }
     if let Some(desc) = desc {
         task.desc = Some(desc);
     }
-    if let Some(start_date) = args.start_date {
+    if clear_start_date {
+        task.start_date = None;
+    }
+    if let Some(start_date) = start_date {
         task.start_date = Some(start_date);
     }
-    if let Some(due_date) = args.due_date {
+    if clear_due_date {
+        task.due_date = None;
+    }
+    if let Some(due_date) = due_date {
         task.due_date = Some(due_date);
     }
-    if let Some(time_zone) = args.time_zone {
+    if clear_time_zone {
+        task.time_zone = None;
+    }
+    if let Some(time_zone) = time_zone {
         task.time_zone = Some(time_zone);
     }
-    if let Some(priority) = args.priority {
+    if let Some(all_day) = all_day {
+        task.is_all_day = Some(all_day);
+    }
+    if let Some(priority) = priority {
         task.priority = Some(priority);
     }
-    if !args.reminders.is_empty() {
-        task.reminders = Some(args.reminders);
+    if clear_tags {
+        task.tags = None;
     }
-    if let Some(repeat_flag) = args.repeat_flag {
+    if !tags.is_empty() {
+        task.tags = Some(tags);
+    }
+    if clear_reminders {
+        task.reminders = None;
+    }
+    if !reminders.is_empty() {
+        task.reminders = Some(reminders);
+    }
+    if let Some(status) = status {
+        task.status = Some(status);
+    }
+    if clear_repeat_flag {
+        task.repeat_flag = None;
+    }
+    if let Some(repeat_flag) = repeat_flag {
         task.repeat_flag = Some(repeat_flag);
     }
-    if let Some(sort_order) = args.sort_order {
+    if clear_sort_order {
+        task.sort_order = None;
+    }
+    if let Some(sort_order) = sort_order {
         task.sort_order = Some(sort_order);
     }
     if note_fields_were_updated {
@@ -430,10 +558,22 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
         sync_task_note_fields(&mut task);
     }
 
-    let updated = client.update_task(&args.task_id, &task).await?;
+    let payload = build_task_update_payload(
+        &task,
+        TaskUpdateClearFlags {
+            start_date: clear_start_date,
+            due_date: clear_due_date,
+            time_zone: clear_time_zone,
+            tags: clear_tags,
+            reminders: clear_reminders,
+            repeat_flag: clear_repeat_flag,
+            sort_order: clear_sort_order,
+        },
+    )?;
+    let updated = client.update_task(&task_id, &payload).await?;
     remember_task(cache.as_ref(), &updated, Some(&resolved.project_id));
 
-    print!("{}", format_task_update_output(&updated, args.output)?);
+    print!("{}", format_task_update_output(&updated, output)?);
 
     Ok(())
 }

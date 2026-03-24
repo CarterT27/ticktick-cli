@@ -1,10 +1,20 @@
 use super::dates::{date_window_for, parse_task_date, task_due_date};
-use super::filters::{normalize_list_name, parse_priority_shorthand, parse_when_token};
+use super::filters::{
+    normalize_list_name, parse_priority_shorthand, parse_task_status_value, parse_when_token,
+};
 use super::projects::{
     extract_inbox_tasks_from_value, normalize_project_id, task_project_id_or_fallback,
 };
 use super::*;
 use chrono::{DateTime, NaiveDate};
+use clap::Parser;
+use serde_json::Value;
+
+#[derive(Debug, Parser)]
+struct TaskUpdateArgsCli {
+    #[command(flatten)]
+    args: TaskUpdateArgs,
+}
 
 fn make_task(
     due_date: Option<&str>,
@@ -48,6 +58,24 @@ fn rejects_invalid_priority_values_with_actionable_message() {
 }
 
 #[test]
+fn parses_task_status_values_from_aliases() {
+    assert_eq!(parse_task_status_value("done"), Ok(TaskStatus::Completed));
+    assert_eq!(
+        parse_task_status_value("Completed"),
+        Ok(TaskStatus::Completed)
+    );
+    assert_eq!(parse_task_status_value("todo"), Ok(TaskStatus::Normal));
+    assert_eq!(parse_task_status_value("OPEN"), Ok(TaskStatus::Normal));
+}
+
+#[test]
+fn rejects_invalid_task_status_values() {
+    let err = parse_task_status_value("blocked").unwrap_err();
+    assert!(err.contains("Unsupported status"));
+    assert!(err.contains("done, completed, todo, open"));
+}
+
+#[test]
 fn parses_when_tokens() {
     assert_eq!(parse_when_token("today"), Some(TaskWhenFilter::Today));
     assert_eq!(parse_when_token("tomorrow"), Some(TaskWhenFilter::Tomorrow));
@@ -84,6 +112,82 @@ fn add_shorthand_keeps_when_terms_for_title() {
     let parsed = parse_task_add_shorthand("plan today");
     assert_eq!(parsed.when, None);
     assert_eq!(parsed.terms, vec!["plan".to_string(), "today".to_string()]);
+}
+
+#[test]
+fn task_update_args_parse_extended_fields_and_clear_flags() {
+    let parsed = TaskUpdateArgsCli::try_parse_from([
+        "tt",
+        "task-123",
+        "--all-day",
+        "false",
+        "--status",
+        "done",
+        "--tags",
+        "work",
+        "--tags",
+        "ops",
+        "--clear-reminders",
+    ])
+    .unwrap()
+    .args;
+
+    assert_eq!(parsed.task_id, "task-123");
+    assert_eq!(parsed.all_day, Some(false));
+    assert_eq!(parsed.status, Some(TaskStatus::Completed));
+    assert_eq!(parsed.tags, vec!["work".to_string(), "ops".to_string()]);
+    assert!(parsed.clear_reminders);
+}
+
+#[test]
+fn task_update_args_reject_conflicting_clear_and_set_flags() {
+    let err = TaskUpdateArgsCli::try_parse_from([
+        "tt",
+        "task-123",
+        "--due-date",
+        "2026-03-26",
+        "--clear-due-date",
+    ])
+    .unwrap_err();
+
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn build_task_update_payload_includes_explicit_clears() {
+    let task = Task {
+        title: "sample".to_string(),
+        start_date: Some("2026-03-01T00:00:00.000+0000".to_string()),
+        due_date: Some("2026-03-02T00:00:00.000+0000".to_string()),
+        time_zone: Some("America/Chicago".to_string()),
+        tags: Some(vec!["work".to_string()]),
+        reminders: Some(vec!["TRIGGER:P0DT9H0M0S".to_string()]),
+        repeat_flag: Some("RRULE:FREQ=DAILY".to_string()),
+        sort_order: Some(42),
+        ..Default::default()
+    };
+
+    let payload = build_task_update_payload(
+        &task,
+        TaskUpdateClearFlags {
+            start_date: true,
+            due_date: true,
+            time_zone: true,
+            tags: true,
+            reminders: true,
+            repeat_flag: true,
+            sort_order: true,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(payload["startDate"], Value::Null);
+    assert_eq!(payload["dueDate"], Value::Null);
+    assert_eq!(payload["timeZone"], Value::Null);
+    assert_eq!(payload["tags"], serde_json::json!([]));
+    assert_eq!(payload["reminders"], serde_json::json!([]));
+    assert_eq!(payload["repeatFlag"], Value::Null);
+    assert_eq!(payload["sortOrder"], Value::Null);
 }
 
 #[test]
