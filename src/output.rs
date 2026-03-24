@@ -3,7 +3,7 @@ use atty::Stream;
 use serde::Serialize;
 use std::io;
 
-#[derive(clap::ValueEnum, Clone, Debug, Default)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
 pub enum OutputFormat {
     #[default]
     Human,
