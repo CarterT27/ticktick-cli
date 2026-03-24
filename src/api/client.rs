@@ -1,4 +1,4 @@
-use crate::config::auth::TickTickOAuth;
+use crate::config::auth::AuthSettings;
 use crate::config::{AppConfig, Config};
 use crate::models::{Column, Project, ProjectData, Task};
 use anyhow::{anyhow, Context, Result};
@@ -198,8 +198,8 @@ impl TickTickClient {
             ));
         }
 
-        let oauth = oauth_client_from_env()?;
-        let refreshed = oauth
+        let settings = auth_settings_from_env()?;
+        let refreshed = settings
             .refresh_access_token(&current_config.refresh_token)
             .await
             .context("Failed to refresh access token")?;
@@ -254,15 +254,8 @@ fn bearer_token_value(access_token: &str) -> String {
     format!("Bearer {}", access_token)
 }
 
-fn oauth_client_from_env() -> Result<TickTickOAuth> {
-    let client_id =
-        std::env::var("TICKTICK_CLIENT_ID").map_err(|_| anyhow!("Missing TICKTICK_CLIENT_ID"))?;
-    let client_secret = std::env::var("TICKTICK_CLIENT_SECRET")
-        .map_err(|_| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?;
-    let redirect_uri = std::env::var("TICKTICK_REDIRECT_URI")
-        .unwrap_or_else(|_| "http://localhost:8080/callback".to_string());
-
-    TickTickOAuth::new(client_id, client_secret, redirect_uri)
+fn auth_settings_from_env() -> Result<AuthSettings> {
+    AuthSettings::from_env()
 }
 
 async fn response_to_result(response: Response) -> Result<Response> {

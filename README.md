@@ -14,10 +14,10 @@ This project is actively evolving. Expect commands and behavior to improve over 
 ## Prerequisites
 
 - Rust toolchain (`rustc` + `cargo`) installed.
-- A TickTick OAuth app/client so you can provide:
-  - `TICKTICK_CLIENT_ID`
-  - `TICKTICK_CLIENT_SECRET`
-- Optional:
+- OAuth configuration via one of these modes:
+  - Bring-your-own TickTick OAuth app (`TICKTICK_CLIENT_ID` + `TICKTICK_CLIENT_SECRET`)
+  - Shared auth broker (defaults provided out of the box)
+- Optional redirect override:
   - `TICKTICK_REDIRECT_URI` (defaults to `http://localhost:8080/callback`)
 
 ## Setup TickTick OAuth (first-time)
@@ -29,6 +29,19 @@ Use the official TickTick Open API docs:
 
 From there, create an app and copy your `client_id` and `client_secret`.
 Also add your redirect URL in the TickTick Developer Center app settings (for example `http://localhost:8080/callback`), and make sure it matches `TICKTICK_REDIRECT_URI` if you set that variable.
+
+If you use the shared auth broker in this repo, the CLI now defaults to:
+
+- `TICKTICK_CLIENT_ID=Ul8jc7U2kv5DwjN6Uw`
+- `TICKTICK_OAUTH_BROKER_URL=https://ticktick-auth-broker.carter-tran.workers.dev`
+
+Users only need to override those variables if they want to use a different app or a different broker.
+
+## Optional: Cloudflare auth broker
+
+For distribution where users should not manage `TICKTICK_CLIENT_SECRET`, deploy the lightweight broker in `cloudflare-auth-broker/`.
+
+See `cloudflare-auth-broker/README.md` for setup and deploy steps.
 
 ## Install
 
@@ -50,13 +63,38 @@ git clone <repo-url>
 cd ticktick-cli
 ```
 
-2. Export required environment variables:
+2. Export environment variables.
+
+BYO credentials mode:
 
 ```bash
 export TICKTICK_CLIENT_ID="<your-client-id>"
 export TICKTICK_CLIENT_SECRET="<your-client-secret>"
 # optional (default is shown)
 export TICKTICK_REDIRECT_URI="http://localhost:8080/callback"
+```
+
+If `TICKTICK_CLIENT_SECRET` is set and `TICKTICK_OAUTH_BROKER_URL` is not, the CLI uses direct OAuth with your app credentials.
+
+Shared broker mode (no local client secret required):
+
+```bash
+unset TICKTICK_CLIENT_SECRET
+export TICKTICK_CLIENT_ID="Ul8jc7U2kv5DwjN6Uw"
+export TICKTICK_OAUTH_BROKER_URL="https://ticktick-auth-broker.carter-tran.workers.dev"
+```
+
+Those two variables are now the CLI defaults, so for the shared broker you can also just run:
+
+```bash
+unset TICKTICK_CLIENT_SECRET
+```
+
+Optional overrides:
+
+```bash
+export TICKTICK_REDIRECT_URI="http://localhost:8080/callback"
+export TICKTICK_OAUTH_BROKER_URL="https://<your-worker-domain>"
 ```
 
 3. Install `tt` from this repo:
@@ -68,7 +106,15 @@ cargo install --path .
 4. Authenticate:
 
 ```bash
+tt auth login
+```
+
+Top-level aliases also work:
+
+```bash
 tt login
+tt status
+tt logout
 ```
 
 After login, credentials are stored in the app config directory used by your OS (the CLI prints the exact file path after successful auth).

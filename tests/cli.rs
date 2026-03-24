@@ -38,6 +38,8 @@ impl CliSandbox {
             .env("XDG_CACHE_HOME", &self.xdg_cache_home)
             .env_remove("TICKTICK_CLIENT_ID")
             .env_remove("TICKTICK_CLIENT_SECRET")
+            .env_remove("TICKTICK_OAUTH_BROKER_URL")
+            .env_remove("TICKTICK_OAUTH_BROKER_KEY")
             .env_remove("TICKTICK_REDIRECT_URI");
         command
     }
@@ -173,14 +175,19 @@ fn list_requires_authentication_before_network_requests() {
 }
 
 #[test]
-fn login_fails_fast_when_client_id_is_missing() {
+fn login_defaults_to_shared_broker_when_env_is_missing() {
     let sandbox = CliSandbox::new();
 
     sandbox
         .command()
+        .env("TICKTICK_REDIRECT_URI", "https://localhost:8080/callback")
         .arg("login")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("TickTick CLI Authentication"))
-        .stderr(predicate::str::contains("Missing TICKTICK_CLIENT_ID"));
+        .stdout(predicate::str::contains("TickTick CLI Authentication").and(
+            predicate::str::contains("Using OAuth broker for token exchange."),
+        ))
+        .stderr(predicate::str::contains(
+            "TICKTICK_REDIRECT_URI must use http for the local callback server",
+        ));
 }

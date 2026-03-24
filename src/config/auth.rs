@@ -1,11 +1,151 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use oauth2::{
     basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
     ClientSecret, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, Scope,
     TokenResponse, TokenType, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const DEFAULT_AUTH_URL: &str = "https://ticktick.com/oauth/authorize";
+const DEFAULT_TOKEN_URL: &str = "https://ticktick.com/oauth/token";
+pub const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
+const DEFAULT_SHARED_CLIENT_ID: &str = "Ul8jc7U2kv5DwjN6Uw";
+const DEFAULT_BROKER_URL: &str = "https://ticktick-auth-broker.carter-tran.workers.dev";
+const DEFAULT_EXPIRES_IN_SECS: i64 = 3600;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthSettings {
+    client_id: String,
+    client_secret: Option<String>,
+    redirect_uri: String,
+    broker_url: Option<String>,
+    broker_api_key: Option<String>,
+}
+
+impl AuthSettings {
+    pub fn from_env() -> Result<Self> {
+        Self::from_env_with(|key| std::env::var(key))
+    }
+
+    fn from_env_with<F>(get_var: F) -> Result<Self>
+    where
+        F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
+    {
+        let client_id = optional_env(&get_var, "TICKTICK_CLIENT_ID")
+            .unwrap_or_else(|| DEFAULT_SHARED_CLIENT_ID.to_string());
+        let redirect_uri = optional_env(&get_var, "TICKTICK_REDIRECT_URI")
+            .unwrap_or_else(|| DEFAULT_REDIRECT_URI.to_string());
+        let explicit_broker_url = optional_env(&get_var, "TICKTICK_OAUTH_BROKER_URL");
+        let broker_api_key = optional_env(&get_var, "TICKTICK_OAUTH_BROKER_KEY");
+        let configured_client_secret = optional_env(&get_var, "TICKTICK_CLIENT_SECRET");
+
+        let broker_url = if explicit_broker_url.is_some() {
+            explicit_broker_url
+        } else if configured_client_secret.is_none() {
+            Some(DEFAULT_BROKER_URL.to_string())
+        } else {
+            None
+        };
+
+        let client_secret = if broker_url.is_some() {
+            configured_client_secret
+        } else {
+            Some(
+                configured_client_secret
+                    .ok_or_else(|| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?,
+            )
+        };
+
+        Ok(Self {
+            client_id,
+            client_secret,
+            redirect_uri,
+            broker_url,
+            broker_api_key,
+        })
+    }
+
+    pub fn oauth_client(&self) -> Result<TickTickOAuth> {
+        TickTickOAuth::new(
+            self.client_id.clone(),
+            self.client_secret.clone(),
+            self.redirect_uri.clone(),
+        )
+    }
+
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    pub fn uses_broker(&self) -> bool {
+        self.broker_url.is_some()
+    }
+
+    pub async fn exchange_code(
+        &self,
+        code: AuthorizationCode,
+        pkce_verifier: PkceCodeVerifier,
+    ) -> Result<TokenResponseData> {
+        match self.broker_url.as_deref() {
+            Some(broker_url) => {
+                TickTickOAuth::exchange_code_via_broker(
+                    code,
+                    pkce_verifier,
+                    self.redirect_uri.clone(),
+                    broker_url,
+                    self.broker_api_key.as_deref(),
+                )
+                .await
+            }
+            None => {
+                self.oauth_client()?
+                    .exchange_code(code, pkce_verifier)
+                    .await
+            }
+        }
+    }
+
+    pub async fn refresh_access_token(&self, refresh_token: &str) -> Result<TokenResponseData> {
+        let refresh_token = refresh_token.trim();
+        if refresh_token.is_empty() {
+            return Err(anyhow!("Missing refresh token in saved config"));
+        }
+
+        match self.broker_url.as_deref() {
+            Some(broker_url) => {
+                TickTickOAuth::refresh_access_token_via_broker(
+                    refresh_token,
+                    broker_url,
+                    self.broker_api_key.as_deref(),
+                )
+                .await
+            }
+            None => {
+                self.oauth_client()?
+                    .refresh_access_token(refresh_token)
+                    .await
+            }
+        }
+    }
+}
+
+fn optional_env<F>(get_var: &F, key: &str) -> Option<String>
+where
+    F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
+{
+    get_var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn unix_timestamp() -> Result<i64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("System time is before UNIX_EPOCH")?
+        .as_secs() as i64)
+}
 
 #[derive(Debug, Clone)]
 pub struct TickTickOAuth {
@@ -14,14 +154,18 @@ pub struct TickTickOAuth {
 }
 
 impl TickTickOAuth {
-    pub fn new(client_id: String, client_secret: String, redirect_uri: String) -> Result<Self> {
-        let auth_url = AuthUrl::new("https://ticktick.com/oauth/authorize".to_string())?;
-        let token_url = TokenUrl::new("https://ticktick.com/oauth/token".to_string())?;
+    pub fn new(
+        client_id: String,
+        client_secret: Option<String>,
+        redirect_uri: String,
+    ) -> Result<Self> {
+        let auth_url = AuthUrl::new(DEFAULT_AUTH_URL.to_string())?;
+        let token_url = TokenUrl::new(DEFAULT_TOKEN_URL.to_string())?;
         let redirect_url = RedirectUrl::new(redirect_uri)?;
 
         let client = BasicClient::new(
             ClientId::new(client_id),
-            Some(ClientSecret::new(client_secret)),
+            client_secret.map(ClientSecret::new),
             auth_url,
             Some(token_url),
         )
@@ -71,6 +215,92 @@ impl TickTickOAuth {
 
         token_response_data(&token)
     }
+
+    pub async fn exchange_code_via_broker(
+        code: AuthorizationCode,
+        pkce_verifier: PkceCodeVerifier,
+        redirect_uri: String,
+        broker_url: &str,
+        broker_api_key: Option<&str>,
+    ) -> Result<TokenResponseData> {
+        let payload = BrokerExchangeRequest {
+            code: code.secret().to_string(),
+            code_verifier: pkce_verifier.secret().to_string(),
+            redirect_uri,
+        };
+
+        send_broker_token_request(broker_url, "/v1/oauth/exchange", &payload, broker_api_key).await
+    }
+
+    pub async fn refresh_access_token_via_broker(
+        refresh_token: &str,
+        broker_url: &str,
+        broker_api_key: Option<&str>,
+    ) -> Result<TokenResponseData> {
+        let payload = BrokerRefreshRequest {
+            refresh_token: refresh_token.to_string(),
+        };
+
+        send_broker_token_request(broker_url, "/v1/oauth/refresh", &payload, broker_api_key).await
+    }
+}
+
+async fn send_broker_token_request<T: Serialize>(
+    broker_url: &str,
+    path: &str,
+    payload: &T,
+    broker_api_key: Option<&str>,
+) -> Result<TokenResponseData> {
+    let endpoint = format!("{}{}", broker_url.trim_end_matches('/'), path);
+    let client = reqwest::Client::new();
+    let mut request = client.post(endpoint).json(payload);
+    if let Some(key) = broker_api_key.filter(|value| !value.trim().is_empty()) {
+        request = request.header("x-broker-key", key);
+    }
+
+    let response = request
+        .send()
+        .await
+        .context("Failed to call OAuth broker")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let details = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "No response body".to_string());
+        return Err(anyhow!(
+            "OAuth broker returned {}: {}",
+            status.as_u16(),
+            details
+        ));
+    }
+
+    let token = response
+        .json::<TokenEndpointResponse>()
+        .await
+        .context("Failed to parse OAuth broker token response")?;
+
+    TokenResponseData::from_token_endpoint_response(token)
+}
+
+#[derive(Debug, Serialize)]
+struct BrokerExchangeRequest {
+    code: String,
+    code_verifier: String,
+    redirect_uri: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BrokerRefreshRequest {
+    refresh_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenEndpointResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,26 +310,32 @@ pub struct TokenResponseData {
     pub expires_at: i64,
 }
 
+impl TokenResponseData {
+    fn from_token_endpoint_response(token: TokenEndpointResponse) -> Result<Self> {
+        Ok(Self {
+            access_token: token.access_token,
+            refresh_token: token.refresh_token.unwrap_or_default(),
+            expires_at: unix_timestamp()? + token.expires_in.unwrap_or(DEFAULT_EXPIRES_IN_SECS),
+        })
+    }
+}
+
 fn token_response_data<T, TT>(token: &T) -> Result<TokenResponseData>
 where
     T: TokenResponse<TT>,
     TT: TokenType,
 {
-    let expires_at = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_secs() as i64
-        + token
-            .expires_in()
-            .unwrap_or(Duration::from_secs(3600))
-            .as_secs() as i64;
-
     Ok(TokenResponseData {
         access_token: token.access_token().secret().to_string(),
         refresh_token: token
             .refresh_token()
-            .map(|t| t.secret().to_string())
+            .map(|token| token.secret().to_string())
             .unwrap_or_default(),
-        expires_at,
+        expires_at: unix_timestamp()?
+            + token
+                .expires_in()
+                .unwrap_or(Duration::from_secs(DEFAULT_EXPIRES_IN_SECS as u64))
+                .as_secs() as i64,
     })
 }
 
@@ -110,10 +346,44 @@ mod tests {
     use url::Url;
 
     #[test]
+    fn auth_settings_allows_broker_without_client_secret() {
+        let values = HashMap::from([("TICKTICK_OAUTH_BROKER_KEY", "secret-key")]);
+        let settings = AuthSettings::from_env_with(|key| {
+            values
+                .get(key)
+                .map(|value| value.to_string())
+                .ok_or(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+
+        assert_eq!(settings.client_id, DEFAULT_SHARED_CLIENT_ID);
+        assert_eq!(settings.client_secret, None);
+        assert_eq!(settings.redirect_uri, DEFAULT_REDIRECT_URI);
+        assert_eq!(settings.broker_url.as_deref(), Some(DEFAULT_BROKER_URL));
+        assert_eq!(settings.broker_api_key.as_deref(), Some("secret-key"));
+    }
+
+    #[test]
+    fn auth_settings_prefers_direct_oauth_when_client_secret_is_set() {
+        let values = HashMap::from([("TICKTICK_CLIENT_SECRET", "client-secret")]);
+        let settings = AuthSettings::from_env_with(|key| {
+            values
+                .get(key)
+                .map(|value| value.to_string())
+                .ok_or(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+
+        assert_eq!(settings.client_id, DEFAULT_SHARED_CLIENT_ID);
+        assert_eq!(settings.client_secret.as_deref(), Some("client-secret"));
+        assert_eq!(settings.broker_url, None);
+    }
+
+    #[test]
     fn new_rejects_invalid_redirect_uri() {
         let result = TickTickOAuth::new(
             "client-id".to_string(),
-            "client-secret".to_string(),
+            Some("client-secret".to_string()),
             "not a valid redirect".to_string(),
         );
 
@@ -124,7 +394,7 @@ mod tests {
     fn auth_url_contains_expected_oauth_parameters() {
         let oauth = TickTickOAuth::new(
             "client-id".to_string(),
-            "client-secret".to_string(),
+            Some("client-secret".to_string()),
             "http://localhost/callback".to_string(),
         )
         .unwrap();

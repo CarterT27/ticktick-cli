@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub mod auth;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub access_token: String,
     pub refresh_token: String,
