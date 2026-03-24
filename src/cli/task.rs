@@ -1,6 +1,6 @@
+use super::bootstrap::authenticated_client;
 use crate::api::TickTickClient;
 use crate::cache::{get_projects_cached, CacheStore};
-use crate::config::AppConfig;
 use crate::models::{Task, TaskStatus};
 use crate::output::{print_tasks, OutputFormat};
 use anyhow::{anyhow, Result};
@@ -988,11 +988,7 @@ pub struct TaskAddArgs {
 
 pub async fn task_add(args: TaskAddArgs) -> Result<()> {
     let mut args = args;
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
 
     let raw_input = if args.stdin || (!atty::is(Stream::Stdin) && args.title.is_empty()) {
@@ -1110,11 +1106,7 @@ pub struct TaskListArgs {
 
 pub async fn task_list(args: TaskListArgs) -> Result<()> {
     let mut args = args;
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
 
     let shorthand = parse_shorthand(&args.query.join(" "));
@@ -1260,11 +1252,7 @@ pub struct TaskUpdateArgs {
 }
 
 pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
     let explicit_scope = args.project_id.is_some() || args.list.is_some();
 
@@ -1358,11 +1346,7 @@ pub struct TaskCompleteArgs {
 }
 
 pub async fn task_complete(args: TaskCompleteArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
     let explicit_scope = args.project_id.is_some() || args.list.is_some();
 
@@ -1411,11 +1395,7 @@ pub struct TaskDeleteArgs {
 }
 
 pub async fn task_delete(args: TaskDeleteArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
     let cache = cache_store();
     let explicit_scope = args.project_id.is_some() || args.list.is_some();
     let mut resolved = resolve_task_project_id(

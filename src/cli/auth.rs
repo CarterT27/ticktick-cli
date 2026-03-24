@@ -1,6 +1,6 @@
+use super::bootstrap::{app_config, load_config};
 use crate::cache::CacheStore;
 use crate::config::auth::TickTickOAuth;
-use crate::config::AppConfig;
 use crate::config::Config;
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
@@ -52,7 +52,7 @@ pub async fn login() -> Result<()> {
         expires_at: token.expires_at,
     };
 
-    let app_config = AppConfig::new()?;
+    let app_config = app_config()?;
     app_config.save(&config)?;
     if let Ok(cache) = CacheStore::new() {
         let _ = cache.clear_all();
@@ -95,7 +95,7 @@ fn wait_for_code(csrf_token: CsrfToken) -> Result<String> {
 }
 
 pub async fn logout() -> Result<()> {
-    let app_config = AppConfig::new()?;
+    let app_config = app_config()?;
     app_config.clear()?;
     if let Ok(cache) = CacheStore::new() {
         let _ = cache.clear_all();
@@ -105,13 +105,13 @@ pub async fn logout() -> Result<()> {
 }
 
 pub async fn status() -> Result<()> {
-    let app_config = AppConfig::new()?;
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
 
-    for line in format_status_lines(app_config.load()?.as_ref(), now) {
+    let config = load_config()?;
+
+    for line in format_status_lines(config.as_ref(), now) {
         println!("{}", line);
     }
 

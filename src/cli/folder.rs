@@ -1,5 +1,4 @@
-use crate::api::TickTickClient;
-use crate::config::AppConfig;
+use super::bootstrap::authenticated_client;
 use crate::output::{print_folders, OutputFormat};
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -23,11 +22,7 @@ pub struct FolderAddArgs {
 }
 
 pub async fn folder_add(args: FolderAddArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let folder = crate::models::Folder {
         id: Uuid::new_v4().to_string(),
@@ -62,11 +57,7 @@ pub struct FolderListArgs {
 }
 
 pub async fn folder_list(args: FolderListArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let mut folders = client.get_folders().await?;
 
@@ -88,11 +79,7 @@ pub struct FolderUpdateArgs {
 }
 
 pub async fn folder_update(args: FolderUpdateArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let folders = client.get_folders().await?;
     let mut folder = folders
@@ -120,11 +107,7 @@ pub struct FolderDeleteArgs {
 }
 
 pub async fn folder_delete(args: FolderDeleteArgs) -> Result<()> {
-    let app_config = AppConfig::new()?;
-    let config = app_config
-        .load()?
-        .ok_or_else(|| anyhow::anyhow!("Not authenticated. Run 'tt auth login' first."))?;
-    let client = TickTickClient::new(config)?;
+    let client = authenticated_client()?;
 
     let folders = client.get_folders().await?;
     let folder = folders
