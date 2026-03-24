@@ -8,7 +8,16 @@ use oauth2::{AuthorizationCode, CsrfToken};
 use std::sync::mpsc;
 use std::time::Duration;
 use tiny_http::{Response, Server};
-use url::Url;
+use url::{Host, Url};
+
+const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocalCallbackConfig {
+    bind_addr: String,
+    callback_origin: String,
+    callback_path: String,
+}
 
 #[derive(Subcommand)]
 pub enum AuthCommands {
@@ -29,8 +38,9 @@ pub async fn login() -> Result<()> {
         std::env::var("TICKTICK_CLIENT_ID").map_err(|_| anyhow!("Missing TICKTICK_CLIENT_ID"))?;
     let client_secret = std::env::var("TICKTICK_CLIENT_SECRET")
         .map_err(|_| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?;
-    let redirect_uri = std::env::var("TICKTICK_REDIRECT_URI")
-        .unwrap_or_else(|_| "http://localhost:8080/callback".to_string());
+    let redirect_uri =
+        std::env::var("TICKTICK_REDIRECT_URI").unwrap_or_else(|_| DEFAULT_REDIRECT_URI.to_string());
+    let callback_config = LocalCallbackConfig::from_redirect_uri(&redirect_uri)?;
 
     let oauth = TickTickOAuth::new(client_id, client_secret, redirect_uri)?;
     let (auth_url, pkce_verifier, csrf_token) = oauth.auth_url();
@@ -41,7 +51,7 @@ pub async fn login() -> Result<()> {
         println!("{}", auth_url);
     }
 
-    let code = wait_for_code(csrf_token)?;
+    let code = wait_for_code(csrf_token, callback_config)?;
     let token = oauth
         .exchange_code(AuthorizationCode::new(code), pkce_verifier)
         .await?;
@@ -66,19 +76,26 @@ pub async fn login() -> Result<()> {
     Ok(())
 }
 
-fn wait_for_code(csrf_token: CsrfToken) -> Result<String> {
-    let server = Server::http("127.0.0.1:8080")
+fn wait_for_code(csrf_token: CsrfToken, callback_config: LocalCallbackConfig) -> Result<String> {
+    let server = Server::http(&callback_config.bind_addr)
         .map_err(|err| anyhow!("Failed to start local server: {}", err))?;
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        if let Ok(request) = server.recv() {
-            let url = format!("http://localhost{}", request.url());
-            let (code, state) = extract_callback_params(&url);
+        while let Ok(request) = server.recv() {
+            let Some(callback_url) = callback_config.callback_url_for_request_target(request.url())
+            else {
+                let _ = request.respond(
+                    Response::from_string("Unexpected OAuth callback path.").with_status_code(404),
+                );
+                continue;
+            };
 
+            let (code, state) = extract_callback_params(&callback_url);
             let body = "Authentication complete. You can close this window.";
             let _ = request.respond(Response::from_string(body));
             let _ = tx.send((code, state));
+            break;
         }
     });
 
@@ -137,6 +154,71 @@ fn extract_callback_params(url: &str) -> (Option<String>, Option<String>) {
     (code, state)
 }
 
+impl LocalCallbackConfig {
+    fn from_redirect_uri(redirect_uri: &str) -> Result<Self> {
+        let parsed = Url::parse(redirect_uri)?;
+        if parsed.scheme() != "http" {
+            return Err(anyhow!(
+                "TICKTICK_REDIRECT_URI must use http for the local callback server"
+            ));
+        }
+
+        let host = parsed
+            .host()
+            .ok_or_else(|| anyhow!("TICKTICK_REDIRECT_URI must include a host"))?;
+        if !is_loopback_host(&host) {
+            return Err(anyhow!(
+                "TICKTICK_REDIRECT_URI must use a loopback host such as localhost, 127.0.0.1, or ::1"
+            ));
+        }
+
+        let port = parsed
+            .port()
+            .ok_or_else(|| anyhow!("TICKTICK_REDIRECT_URI must include an explicit port"))?;
+        let host = format_host(&host);
+        let path = normalize_callback_path(parsed.path());
+
+        Ok(Self {
+            bind_addr: format!("{}:{}", host, port),
+            callback_origin: format!("http://{}:{}", host, port),
+            callback_path: path,
+        })
+    }
+
+    fn callback_url_for_request_target(&self, request_target: &str) -> Option<String> {
+        let request_path = request_target.split('?').next().unwrap_or_default();
+        if request_path != self.callback_path {
+            return None;
+        }
+
+        Some(format!("{}{}", self.callback_origin, request_target))
+    }
+}
+
+fn is_loopback_host(host: &Host<&str>) -> bool {
+    match host {
+        Host::Domain(domain) => *domain == "localhost",
+        Host::Ipv4(addr) => addr.is_loopback(),
+        Host::Ipv6(addr) => addr.is_loopback(),
+    }
+}
+
+fn format_host(host: &Host<&str>) -> String {
+    match host {
+        Host::Domain(domain) => (*domain).to_string(),
+        Host::Ipv4(addr) => addr.to_string(),
+        Host::Ipv6(addr) => format!("[{}]", addr),
+    }
+}
+
+fn normalize_callback_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 fn format_status_lines(config: Option<&Config>, now: i64) -> Vec<String> {
     match config {
         Some(config) => {
@@ -191,6 +273,50 @@ mod tests {
         let (code, state) = extract_callback_params("not a url");
         assert_eq!(code, None);
         assert_eq!(state, None);
+    }
+
+    #[test]
+    fn local_callback_config_uses_redirect_uri_host_port_and_path() {
+        let callback =
+            LocalCallbackConfig::from_redirect_uri("http://127.0.0.1:9090/custom/callback")
+                .unwrap();
+
+        assert_eq!(callback.bind_addr, "127.0.0.1:9090");
+        assert_eq!(callback.callback_origin, "http://127.0.0.1:9090");
+        assert_eq!(callback.callback_path, "/custom/callback");
+    }
+
+    #[test]
+    fn local_callback_config_rejects_non_loopback_redirect_hosts() {
+        let error = LocalCallbackConfig::from_redirect_uri("http://example.com:8080/callback")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("loopback host"));
+    }
+
+    #[test]
+    fn local_callback_config_requires_an_explicit_port() {
+        let error = LocalCallbackConfig::from_redirect_uri("http://localhost/callback")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("explicit port"));
+    }
+
+    #[test]
+    fn callback_url_for_request_target_requires_matching_path() {
+        let callback =
+            LocalCallbackConfig::from_redirect_uri("http://localhost:8080/callback").unwrap();
+
+        assert_eq!(
+            callback.callback_url_for_request_target("/callback?code=a&state=b"),
+            Some("http://localhost:8080/callback?code=a&state=b".to_string())
+        );
+        assert_eq!(
+            callback.callback_url_for_request_target("/favicon.ico"),
+            None
+        );
     }
 
     #[test]
