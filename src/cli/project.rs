@@ -1,6 +1,6 @@
 use super::bootstrap::authenticated_client;
 use crate::cache::{get_projects_cached, CacheStore};
-use crate::models::{Project, ProjectData};
+use crate::models::{Column, NewColumn, Project, ProjectData};
 use crate::output::{print_projects, OutputFormat};
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -21,6 +21,26 @@ pub enum ProjectCommands {
     Update(ProjectUpdateArgs),
     #[command(aliases = ["rm", "del"])]
     Delete(ProjectDeleteArgs),
+    Section {
+        #[command(subcommand)]
+        subcommand: ProjectSectionCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProjectSectionCommands {
+    #[command(alias = "new")]
+    Add(ProjectSectionAddArgs),
+}
+
+#[derive(Args)]
+pub struct ProjectSectionAddArgs {
+    project_id: String,
+    name: String,
+    #[arg(long)]
+    sort_order: Option<i64>,
+    #[arg(long, default_value = "human")]
+    output: OutputFormat,
 }
 
 #[derive(Args)]
@@ -193,6 +213,21 @@ pub async fn project_delete(args: ProjectDeleteArgs) -> Result<()> {
     Ok(())
 }
 
+pub async fn project_section_add(args: ProjectSectionAddArgs) -> Result<()> {
+    let client = authenticated_client()?;
+
+    let new_column = NewColumn {
+        project_id: args.project_id,
+        name: args.name,
+        sort_order: args.sort_order,
+    };
+
+    let created = client.create_column(&new_column).await?;
+    print!("{}", format_section_create_output(&created, args.output)?);
+
+    Ok(())
+}
+
 fn build_project_from_add_args(args: &ProjectAddArgs) -> Project {
     Project {
         id: None,
@@ -277,6 +312,16 @@ fn format_project_data_output(data: &ProjectData, format: OutputFormat) -> Resul
     }
 }
 
+fn format_section_create_output(column: &Column, format: OutputFormat) -> Result<String> {
+    match format {
+        OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(column)?)),
+        OutputFormat::Human => Ok(format!(
+            "Section created: {}\nID: {}\nProject ID: {}\n",
+            column.name, column.id, column.project_id
+        )),
+    }
+}
+
 fn apply_project_update_args(project: &mut Project, args: &ProjectUpdateArgs) {
     if let Some(name) = args.name.as_ref() {
         project.name = name.clone();
@@ -300,7 +345,7 @@ fn apply_project_update_args(project: &mut Project, args: &ProjectUpdateArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Column, Task};
+    use crate::models::Task;
 
     fn sample_project() -> Project {
         Project {
@@ -414,5 +459,25 @@ mod tests {
         assert_eq!(project.view_mode.as_deref(), Some("kanban"));
         assert_eq!(project.kind.as_deref(), Some("TASK"));
         assert_eq!(project.sort_order, Some(7));
+    }
+
+    #[test]
+    fn format_section_create_output_matches_selected_mode() {
+        let section = Column {
+            id: "section-1".to_string(),
+            project_id: "project-1".to_string(),
+            name: "Backlog".to_string(),
+            sort_order: Some(1),
+        };
+
+        let human = format_section_create_output(&section, OutputFormat::Human).unwrap();
+        assert!(human.contains("Section created: Backlog"));
+        assert!(human.contains("ID: section-1"));
+        assert!(human.contains("Project ID: project-1"));
+
+        let json = format_section_create_output(&section, OutputFormat::Json).unwrap();
+        assert!(json.contains("\"id\": \"section-1\""));
+        assert!(json.contains("\"projectId\": \"project-1\""));
+        assert!(json.contains("\"name\": \"Backlog\""));
     }
 }

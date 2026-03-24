@@ -1,6 +1,6 @@
 use crate::config::auth::AuthSettings;
 use crate::config::{AppConfig, Config};
-use crate::models::{Column, Project, ProjectData, Task};
+use crate::models::{Column, NewColumn, Project, ProjectData, Task};
 use anyhow::{anyhow, Context, Result};
 use reqwest::{header, Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,13 @@ impl TickTickClient {
         let endpoint = format!("/project/{}", project_id);
         self.request("DELETE", &endpoint, None).await?;
         Ok(())
+    }
+
+    pub async fn create_column(&self, column: &NewColumn) -> Result<Column> {
+        let body = json!(column);
+        let response = self.request("POST", "/column", Some(body)).await?;
+        let created: Column = response.json().await.context("Failed to parse response")?;
+        Ok(created)
     }
 
     pub async fn get_task(&self, project_id: &str, task_id: &str) -> Result<Task> {

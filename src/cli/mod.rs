@@ -77,6 +77,9 @@ pub async fn run() -> anyhow::Result<()> {
             project::ProjectCommands::Data(args) => project_data(args).await,
             project::ProjectCommands::Update(args) => project_update(args).await,
             project::ProjectCommands::Delete(args) => project_delete(args).await,
+            project::ProjectCommands::Section { subcommand } => match subcommand {
+                project::ProjectSectionCommands::Add(args) => project_section_add(args).await,
+            },
         },
         Commands::Ls(args) => task_list(args).await,
         Commands::Add(args) => task_add(args).await,
@@ -137,6 +140,24 @@ mod tests {
             project_update_cli.command,
             Commands::Project {
                 subcommand: project::ProjectCommands::Update(_)
+            }
+        ));
+
+        let section_add_cli = Cli::try_parse_from([
+            "tt",
+            "project",
+            "section",
+            "add",
+            "project-1",
+            "Backlog",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            section_add_cli.command,
+            Commands::Project {
+                subcommand: project::ProjectCommands::Section { .. }
             }
         ));
     }

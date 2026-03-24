@@ -167,6 +167,15 @@ pub struct Column {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct NewColumn {
+    pub project_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectData {
     pub project: Project,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -81,6 +81,9 @@ tt project add "Work"
 
 # inspect one
 tt project get <project-id>
+
+# add a section within a project
+tt project section add <project-id> "Backlog"
 ```
 
 ## Development
