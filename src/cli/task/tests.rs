@@ -8,6 +8,7 @@ use super::projects::{
 use super::*;
 use chrono::{DateTime, NaiveDate};
 use clap::Parser;
+use iana_time_zone::get_timezone;
 use serde_json::Value;
 
 #[derive(Debug, Parser)]
@@ -188,6 +189,45 @@ fn build_task_update_payload_includes_explicit_clears() {
     assert_eq!(payload["reminders"], serde_json::json!([]));
     assert_eq!(payload["repeatFlag"], Value::Null);
     assert_eq!(payload["sortOrder"], Value::Null);
+}
+
+#[test]
+fn applies_system_time_zone_default_when_task_has_dates() {
+    let mut task = Task {
+        title: "sample".to_string(),
+        due_date: Some("2026-03-02T00:00:00.000+0000".to_string()),
+        ..Default::default()
+    };
+
+    apply_system_time_zone_default(&mut task).unwrap();
+
+    assert_eq!(task.time_zone, Some(get_timezone().unwrap()));
+}
+
+#[test]
+fn skips_system_time_zone_default_without_dates() {
+    let mut task = Task {
+        title: "sample".to_string(),
+        ..Default::default()
+    };
+
+    apply_system_time_zone_default(&mut task).unwrap();
+
+    assert_eq!(task.time_zone, None);
+}
+
+#[test]
+fn preserves_existing_time_zone_when_present() {
+    let mut task = Task {
+        title: "sample".to_string(),
+        due_date: Some("2026-03-02T00:00:00.000+0000".to_string()),
+        time_zone: Some("Europe/Berlin".to_string()),
+        ..Default::default()
+    };
+
+    apply_system_time_zone_default(&mut task).unwrap();
+
+    assert_eq!(task.time_zone.as_deref(), Some("Europe/Berlin"));
 }
 
 #[test]
