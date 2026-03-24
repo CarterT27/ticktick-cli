@@ -16,7 +16,7 @@ This project is actively evolving. Expect commands and behavior to improve over 
 - Rust toolchain (`rustc` + `cargo`) installed.
 - OAuth configuration via one of these modes:
   - Bring-your-own TickTick OAuth app (`TICKTICK_CLIENT_ID` + `TICKTICK_CLIENT_SECRET`)
-  - Shared auth broker (`TICKTICK_CLIENT_ID` + `TICKTICK_OAUTH_BROKER_URL`)
+  - Shared auth broker (defaults provided out of the box)
 - Optional redirect override:
   - `TICKTICK_REDIRECT_URI` (defaults to `http://localhost:8080/callback`)
 
@@ -30,7 +30,12 @@ Use the official TickTick Open API docs:
 From there, create an app and copy your `client_id` and `client_secret`.
 Also add your redirect URL in the TickTick Developer Center app settings (for example `http://localhost:8080/callback`), and make sure it matches `TICKTICK_REDIRECT_URI` if you set that variable.
 
-If you use a shared auth broker, users only need your shared `client_id` and broker URL.
+If you use the shared auth broker in this repo, the CLI now defaults to:
+
+- `TICKTICK_CLIENT_ID=Ul8jc7U2kv5DwjN6Uw`
+- `TICKTICK_OAUTH_BROKER_URL=https://ticktick-auth-broker.carter-tran.workers.dev`
+
+Users only need to override those variables if they want to use a different app or a different broker.
 
 ## Optional: Cloudflare auth broker
 
@@ -69,15 +74,27 @@ export TICKTICK_CLIENT_SECRET="<your-client-secret>"
 export TICKTICK_REDIRECT_URI="http://localhost:8080/callback"
 ```
 
+If `TICKTICK_CLIENT_SECRET` is set and `TICKTICK_OAUTH_BROKER_URL` is not, the CLI uses direct OAuth with your app credentials.
+
 Shared broker mode (no local client secret required):
 
 ```bash
-export TICKTICK_CLIENT_ID="<shared-client-id>"
-export TICKTICK_OAUTH_BROKER_URL="https://<your-worker-domain>"
-# optional broker header key if your broker enforces one
-export TICKTICK_OAUTH_BROKER_KEY="<broker-key>"
-# optional (default is shown)
+unset TICKTICK_CLIENT_SECRET
+export TICKTICK_CLIENT_ID="Ul8jc7U2kv5DwjN6Uw"
+export TICKTICK_OAUTH_BROKER_URL="https://ticktick-auth-broker.carter-tran.workers.dev"
+```
+
+Those two variables are now the CLI defaults, so for the shared broker you can also just run:
+
+```bash
+unset TICKTICK_CLIENT_SECRET
+```
+
+Optional overrides:
+
+```bash
 export TICKTICK_REDIRECT_URI="http://localhost:8080/callback"
+export TICKTICK_OAUTH_BROKER_URL="https://<your-worker-domain>"
 ```
 
 3. Install `tt` from this repo:
@@ -89,7 +106,15 @@ cargo install --path .
 4. Authenticate:
 
 ```bash
+tt auth login
+```
+
+Top-level aliases also work:
+
+```bash
 tt login
+tt status
+tt logout
 ```
 
 After login, credentials are stored in the app config directory used by your OS (the CLI prints the exact file path after successful auth).

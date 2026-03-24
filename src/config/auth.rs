@@ -10,6 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEFAULT_AUTH_URL: &str = "https://ticktick.com/oauth/authorize";
 const DEFAULT_TOKEN_URL: &str = "https://ticktick.com/oauth/token";
 pub const DEFAULT_REDIRECT_URI: &str = "http://localhost:8080/callback";
+const DEFAULT_SHARED_CLIENT_ID: &str = "Ul8jc7U2kv5DwjN6Uw";
+const DEFAULT_BROKER_URL: &str = "https://ticktick-auth-broker.carter-tran.workers.dev";
 const DEFAULT_EXPIRES_IN_SECS: i64 = 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,16 +32,29 @@ impl AuthSettings {
     where
         F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
     {
-        let client_id = required_env(&get_var, "TICKTICK_CLIENT_ID")?;
+        let client_id = optional_env(&get_var, "TICKTICK_CLIENT_ID")
+            .unwrap_or_else(|| DEFAULT_SHARED_CLIENT_ID.to_string());
         let redirect_uri = optional_env(&get_var, "TICKTICK_REDIRECT_URI")
             .unwrap_or_else(|| DEFAULT_REDIRECT_URI.to_string());
-        let broker_url = optional_env(&get_var, "TICKTICK_OAUTH_BROKER_URL");
+        let explicit_broker_url = optional_env(&get_var, "TICKTICK_OAUTH_BROKER_URL");
         let broker_api_key = optional_env(&get_var, "TICKTICK_OAUTH_BROKER_KEY");
+        let configured_client_secret = optional_env(&get_var, "TICKTICK_CLIENT_SECRET");
+
+        let broker_url = if explicit_broker_url.is_some() {
+            explicit_broker_url
+        } else if configured_client_secret.is_none() {
+            Some(DEFAULT_BROKER_URL.to_string())
+        } else {
+            None
+        };
 
         let client_secret = if broker_url.is_some() {
-            optional_env(&get_var, "TICKTICK_CLIENT_SECRET")
+            configured_client_secret
         } else {
-            Some(required_env(&get_var, "TICKTICK_CLIENT_SECRET")?)
+            Some(
+                configured_client_secret
+                    .ok_or_else(|| anyhow!("Missing TICKTICK_CLIENT_SECRET"))?,
+            )
         };
 
         Ok(Self {
@@ -113,13 +128,6 @@ impl AuthSettings {
             }
         }
     }
-}
-
-fn required_env<F>(get_var: &F, key: &str) -> Result<String>
-where
-    F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
-{
-    optional_env(get_var, key).ok_or_else(|| anyhow!("Missing {}", key))
 }
 
 fn optional_env<F>(get_var: &F, key: &str) -> Option<String>
@@ -339,11 +347,7 @@ mod tests {
 
     #[test]
     fn auth_settings_allows_broker_without_client_secret() {
-        let values = HashMap::from([
-            ("TICKTICK_CLIENT_ID", "client-id"),
-            ("TICKTICK_OAUTH_BROKER_URL", "https://broker.example"),
-            ("TICKTICK_OAUTH_BROKER_KEY", "secret-key"),
-        ]);
+        let values = HashMap::from([("TICKTICK_OAUTH_BROKER_KEY", "secret-key")]);
         let settings = AuthSettings::from_env_with(|key| {
             values
                 .get(key)
@@ -352,14 +356,27 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(settings.client_id, "client-id");
+        assert_eq!(settings.client_id, DEFAULT_SHARED_CLIENT_ID);
         assert_eq!(settings.client_secret, None);
         assert_eq!(settings.redirect_uri, DEFAULT_REDIRECT_URI);
-        assert_eq!(
-            settings.broker_url.as_deref(),
-            Some("https://broker.example")
-        );
+        assert_eq!(settings.broker_url.as_deref(), Some(DEFAULT_BROKER_URL));
         assert_eq!(settings.broker_api_key.as_deref(), Some("secret-key"));
+    }
+
+    #[test]
+    fn auth_settings_prefers_direct_oauth_when_client_secret_is_set() {
+        let values = HashMap::from([("TICKTICK_CLIENT_SECRET", "client-secret")]);
+        let settings = AuthSettings::from_env_with(|key| {
+            values
+                .get(key)
+                .map(|value| value.to_string())
+                .ok_or(std::env::VarError::NotPresent)
+        })
+        .unwrap();
+
+        assert_eq!(settings.client_id, DEFAULT_SHARED_CLIENT_ID);
+        assert_eq!(settings.client_secret.as_deref(), Some("client-secret"));
+        assert_eq!(settings.broker_url, None);
     }
 
     #[test]

@@ -92,10 +92,10 @@ curl -X POST "https://<your-worker>/v1/oauth/exchange" \
 For `ticktick-cli`, users can set:
 
 ```bash
-export TICKTICK_CLIENT_ID="<shared-client-id>"
-export TICKTICK_OAUTH_BROKER_URL="https://<your-worker-domain>"
-# optional
-export TICKTICK_OAUTH_BROKER_KEY="<broker-key>"
+export TICKTICK_CLIENT_ID="Ul8jc7U2kv5DwjN6Uw"
+export TICKTICK_OAUTH_BROKER_URL="https://ticktick-auth-broker.carter-tran.workers.dev"
 ```
 
 `TICKTICK_CLIENT_SECRET` is not required on user machines when broker mode is used.
+
+Those values are the default broker settings used by the CLI when `TICKTICK_CLIENT_SECRET` is unset, so users only need to export them if they want to override the shared defaults.
