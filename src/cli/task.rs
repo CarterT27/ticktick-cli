@@ -83,6 +83,17 @@ fn cached_task_project_id(cache: Option<&CacheStore>, task_id: &str) -> Option<S
     cache.and_then(|cache| cache.get_task_project_id(task_id).ok().flatten())
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct TaskUpdateClearFlags {
+    start_date: bool,
+    due_date: bool,
+    time_zone: bool,
+    tags: bool,
+    reminders: bool,
+    repeat_flag: bool,
+    sort_order: bool,
+}
+
 fn parse_priority_shorthand(token: &str) -> Option<i32> {
     let value = token.strip_prefix('!')?.to_ascii_lowercase();
     match value.as_str() {
@@ -107,6 +118,17 @@ fn parse_priority_value(value: &str) -> std::result::Result<i32, String> {
                 value
             )
         }),
+    }
+}
+
+fn parse_task_status_value(value: &str) -> std::result::Result<TaskStatus, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "done" | "completed" => Ok(TaskStatus::Completed),
+        "todo" | "open" => Ok(TaskStatus::Normal),
+        _ => Err(format!(
+            "Unsupported status '{}'. Use one of: done, completed, todo, open",
+            value
+        )),
     }
 }
 
@@ -1209,7 +1231,7 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Args)]
+#[derive(Debug, Args)]
 pub struct TaskUpdateArgs {
     task_id: String,
     #[arg(long)]
@@ -1225,79 +1247,195 @@ pub struct TaskUpdateArgs {
         help = "Secondary TickTick API description field; mirrored to content when used alone"
     )]
     desc: Option<String>,
-    #[arg(long, value_parser = normalize_task_datetime_input)]
+    #[arg(
+        long,
+        value_parser = normalize_task_datetime_input,
+        conflicts_with = "clear_start_date"
+    )]
     start_date: Option<String>,
-    #[arg(long, value_parser = normalize_task_datetime_input)]
+    #[arg(
+        long,
+        value_parser = normalize_task_datetime_input,
+        conflicts_with = "clear_due_date"
+    )]
     due_date: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "clear_time_zone")]
     time_zone: Option<String>,
+    #[arg(long)]
+    all_day: Option<bool>,
     #[arg(long, value_parser = parse_priority_value)]
     priority: Option<i32>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "clear_tags")]
+    tags: Vec<String>,
+    #[arg(long, conflicts_with = "clear_reminders")]
     reminders: Vec<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_task_status_value)]
+    status: Option<TaskStatus>,
+    #[arg(long, conflicts_with = "clear_repeat_flag")]
     repeat_flag: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "clear_sort_order")]
     sort_order: Option<i64>,
+    #[arg(long)]
+    clear_start_date: bool,
+    #[arg(long)]
+    clear_due_date: bool,
+    #[arg(long)]
+    clear_time_zone: bool,
+    #[arg(long)]
+    clear_tags: bool,
+    #[arg(long)]
+    clear_reminders: bool,
+    #[arg(long)]
+    clear_repeat_flag: bool,
+    #[arg(long)]
+    clear_sort_order: bool,
     #[arg(long, default_value = "human")]
     output: OutputFormat,
 }
 
+fn build_task_update_payload(task: &Task, clear_flags: TaskUpdateClearFlags) -> Result<Value> {
+    let mut payload = serde_json::to_value(task)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Failed to encode task update payload as JSON object"))?;
+
+    if clear_flags.start_date {
+        object.insert("startDate".to_string(), Value::Null);
+    }
+    if clear_flags.due_date {
+        object.insert("dueDate".to_string(), Value::Null);
+    }
+    if clear_flags.time_zone {
+        object.insert("timeZone".to_string(), Value::Null);
+    }
+    if clear_flags.tags {
+        object.insert("tags".to_string(), Value::Array(Vec::new()));
+    }
+    if clear_flags.reminders {
+        object.insert("reminders".to_string(), Value::Array(Vec::new()));
+    }
+    if clear_flags.repeat_flag {
+        object.insert("repeatFlag".to_string(), Value::Null);
+    }
+    if clear_flags.sort_order {
+        object.insert("sortOrder".to_string(), Value::Null);
+    }
+
+    Ok(payload)
+}
+
 pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
+    let TaskUpdateArgs {
+        task_id,
+        project_id,
+        list,
+        title,
+        content,
+        desc,
+        start_date,
+        due_date,
+        time_zone,
+        all_day,
+        priority,
+        tags,
+        reminders,
+        status,
+        repeat_flag,
+        sort_order,
+        clear_start_date,
+        clear_due_date,
+        clear_time_zone,
+        clear_tags,
+        clear_reminders,
+        clear_repeat_flag,
+        clear_sort_order,
+        output,
+    } = args;
+
     let client = authenticated_client()?;
     let cache = cache_store();
-    let explicit_scope = args.project_id.is_some() || args.list.is_some();
+    let explicit_scope = project_id.is_some() || list.is_some();
 
     let mut resolved = resolve_task_project_id(
         &client,
         cache.as_ref(),
-        &args.task_id,
-        args.project_id.clone(),
-        args.list.clone(),
+        &task_id,
+        project_id.clone(),
+        list.clone(),
     )
     .await?;
 
-    let mut task = match client.get_task(&resolved.project_id, &args.task_id).await {
+    let mut task = match client.get_task(&resolved.project_id, &task_id).await {
         Ok(task) => task,
         Err(_) if resolved.from_cache && !explicit_scope => {
-            forget_task_project_id(cache.as_ref(), &args.task_id);
+            forget_task_project_id(cache.as_ref(), &task_id);
             resolved =
-                resolve_task_project_id(&client, cache.as_ref(), &args.task_id, None, None).await?;
-            client.get_task(&resolved.project_id, &args.task_id).await?
+                resolve_task_project_id(&client, cache.as_ref(), &task_id, None, None).await?;
+            client.get_task(&resolved.project_id, &task_id).await?
         }
         Err(err) => return Err(err),
     };
 
-    if let Some(title) = args.title {
+    if let Some(title) = title {
         task.title = title;
     }
-    let note_fields_were_updated = args.content.is_some() || args.desc.is_some();
-    let (content, desc) = resolve_task_note_fields(args.content, args.desc);
+    let note_fields_were_updated = content.is_some() || desc.is_some();
+    let (content, desc) = resolve_task_note_fields(content, desc);
     if let Some(content) = content {
         task.content = Some(content);
     }
     if let Some(desc) = desc {
         task.desc = Some(desc);
     }
-    if let Some(start_date) = args.start_date {
+    if clear_start_date {
+        task.start_date = None;
+    }
+    if let Some(start_date) = start_date {
         task.start_date = Some(start_date);
     }
-    if let Some(due_date) = args.due_date {
+    if clear_due_date {
+        task.due_date = None;
+    }
+    if let Some(due_date) = due_date {
         task.due_date = Some(due_date);
     }
-    if let Some(time_zone) = args.time_zone {
+    if clear_time_zone {
+        task.time_zone = None;
+    }
+    if let Some(time_zone) = time_zone {
         task.time_zone = Some(time_zone);
     }
-    if let Some(priority) = args.priority {
+    if let Some(all_day) = all_day {
+        task.is_all_day = Some(all_day);
+    }
+    if let Some(priority) = priority {
         task.priority = Some(priority);
     }
-    if !args.reminders.is_empty() {
-        task.reminders = Some(args.reminders);
+    if clear_tags {
+        task.tags = None;
     }
-    if let Some(repeat_flag) = args.repeat_flag {
+    if !tags.is_empty() {
+        task.tags = Some(tags);
+    }
+    if clear_reminders {
+        task.reminders = None;
+    }
+    if !reminders.is_empty() {
+        task.reminders = Some(reminders);
+    }
+    if let Some(status) = status {
+        task.status = Some(status);
+    }
+    if clear_repeat_flag {
+        task.repeat_flag = None;
+    }
+    if let Some(repeat_flag) = repeat_flag {
         task.repeat_flag = Some(repeat_flag);
     }
-    if let Some(sort_order) = args.sort_order {
+    if clear_sort_order {
+        task.sort_order = None;
+    }
+    if let Some(sort_order) = sort_order {
         task.sort_order = Some(sort_order);
     }
     if note_fields_were_updated {
@@ -1311,10 +1449,21 @@ pub async fn task_update(args: TaskUpdateArgs) -> Result<()> {
         sync_task_note_fields(&mut task);
     }
 
-    let updated = client.update_task(&args.task_id, &task).await?;
+    let payload = build_task_update_payload(
+        &task,
+        TaskUpdateClearFlags {
+            start_date: clear_start_date,
+            due_date: clear_due_date,
+            time_zone: clear_time_zone,
+            tags: clear_tags,
+            reminders: clear_reminders,
+            repeat_flag: clear_repeat_flag,
+            sort_order: clear_sort_order,
+        },
+    )?;
+    let updated = client.update_task(&task_id, &payload).await?;
     remember_task(cache.as_ref(), &updated, Some(&resolved.project_id));
-
-    print!("{}", format_task_update_output(&updated, args.output)?);
+    print!("{}", format_task_update_output(&updated, output)?);
 
     Ok(())
 }
@@ -1459,6 +1608,13 @@ fn format_task_action_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct TaskUpdateArgsCli {
+        #[command(flatten)]
+        args: TaskUpdateArgs,
+    }
 
     fn make_task(
         due_date: Option<&str>,
@@ -1499,6 +1655,100 @@ mod tests {
         let err = parse_priority_value("urgent").unwrap_err();
         assert!(err.contains("Invalid priority"));
         assert!(err.contains("none, low, medium, high"));
+    }
+
+    #[test]
+    fn parses_task_status_values_from_aliases() {
+        assert_eq!(parse_task_status_value("done"), Ok(TaskStatus::Completed));
+        assert_eq!(
+            parse_task_status_value("Completed"),
+            Ok(TaskStatus::Completed)
+        );
+        assert_eq!(parse_task_status_value("todo"), Ok(TaskStatus::Normal));
+        assert_eq!(parse_task_status_value("OPEN"), Ok(TaskStatus::Normal));
+    }
+
+    #[test]
+    fn rejects_invalid_task_status_values() {
+        let err = parse_task_status_value("blocked").unwrap_err();
+        assert!(err.contains("Unsupported status"));
+        assert!(err.contains("done, completed, todo, open"));
+    }
+
+    #[test]
+    fn task_update_args_parse_extended_fields_and_clear_flags() {
+        let parsed = TaskUpdateArgsCli::try_parse_from([
+            "tt",
+            "task-123",
+            "--all-day",
+            "false",
+            "--status",
+            "done",
+            "--tags",
+            "work",
+            "--tags",
+            "ops",
+            "--clear-reminders",
+        ])
+        .unwrap()
+        .args;
+
+        assert_eq!(parsed.task_id, "task-123");
+        assert_eq!(parsed.all_day, Some(false));
+        assert_eq!(parsed.status, Some(TaskStatus::Completed));
+        assert_eq!(parsed.tags, vec!["work".to_string(), "ops".to_string()]);
+        assert!(parsed.clear_reminders);
+    }
+
+    #[test]
+    fn task_update_args_reject_conflicting_clear_and_set_flags() {
+        let err = TaskUpdateArgsCli::try_parse_from([
+            "tt",
+            "task-123",
+            "--due-date",
+            "2026-03-26",
+            "--clear-due-date",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn build_task_update_payload_includes_explicit_clears() {
+        let task = Task {
+            title: "sample".to_string(),
+            start_date: Some("2026-03-01T00:00:00.000+0000".to_string()),
+            due_date: Some("2026-03-02T00:00:00.000+0000".to_string()),
+            time_zone: Some("America/Chicago".to_string()),
+            tags: Some(vec!["work".to_string()]),
+            reminders: Some(vec!["TRIGGER:P0DT9H0M0S".to_string()]),
+            repeat_flag: Some("RRULE:FREQ=DAILY".to_string()),
+            sort_order: Some(42),
+            ..Default::default()
+        };
+
+        let payload = build_task_update_payload(
+            &task,
+            TaskUpdateClearFlags {
+                start_date: true,
+                due_date: true,
+                time_zone: true,
+                tags: true,
+                reminders: true,
+                repeat_flag: true,
+                sort_order: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(payload["startDate"], Value::Null);
+        assert_eq!(payload["dueDate"], Value::Null);
+        assert_eq!(payload["timeZone"], Value::Null);
+        assert_eq!(payload["tags"], serde_json::json!([]));
+        assert_eq!(payload["reminders"], serde_json::json!([]));
+        assert_eq!(payload["repeatFlag"], Value::Null);
+        assert_eq!(payload["sortOrder"], Value::Null);
     }
 
     #[test]
