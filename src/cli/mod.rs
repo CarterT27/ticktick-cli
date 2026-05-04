@@ -66,6 +66,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Task { subcommand } => match subcommand {
             task::TaskCommands::Add(args) => task_add(args).await,
             task::TaskCommands::List(args) => task_list(args).await,
+            task::TaskCommands::Info(args) => task_info(args).await,
             task::TaskCommands::Update(args) => task_update(args).await,
             task::TaskCommands::Complete(args) => task_complete(args).await,
             task::TaskCommands::Delete(args) => task_delete(args).await,
@@ -112,6 +113,14 @@ mod tests {
     fn parses_task_and_project_shortcuts() {
         let list_cli = Cli::try_parse_from(["tt", "ls", "inbox"]).unwrap();
         assert!(matches!(list_cli.command, Commands::Ls(_)));
+
+        let task_info_cli = Cli::try_parse_from(["tt", "task", "info", "task-1"]).unwrap();
+        assert!(matches!(
+            task_info_cli.command,
+            Commands::Task {
+                subcommand: task::TaskCommands::Info(_)
+            }
+        ));
 
         let projects_cli = Cli::try_parse_from(["tt", "projects", "--name", "Work"]).unwrap();
         assert!(matches!(projects_cli.command, Commands::Projects(_)));

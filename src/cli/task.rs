@@ -35,6 +35,8 @@ pub enum TaskCommands {
     Add(TaskAddArgs),
     #[command(alias = "ls")]
     List(TaskListArgs),
+    #[command(aliases = ["get", "show"])]
+    Info(TaskInfoArgs),
     #[command(alias = "edit")]
     Update(TaskUpdateArgs),
     #[command(alias = "done")]
@@ -351,6 +353,49 @@ pub async fn task_list(args: TaskListArgs) -> Result<()> {
     }
 
     print_tasks(&tasks, args.output);
+    Ok(())
+}
+
+#[derive(Args)]
+pub struct TaskInfoArgs {
+    task_id: String,
+    #[arg(long)]
+    project_id: Option<String>,
+    #[arg(long)]
+    list: Option<String>,
+    #[arg(long, default_value = "human")]
+    output: OutputFormat,
+}
+
+pub async fn task_info(args: TaskInfoArgs) -> Result<()> {
+    let TaskInfoArgs {
+        task_id,
+        project_id,
+        list,
+        output,
+    } = args;
+
+    let client = authenticated_client()?;
+    let cache = cache_store();
+    let explicit_scope = project_id.is_some() || list.is_some();
+
+    let mut resolved =
+        resolve_task_project_id(&client, cache.as_ref(), &task_id, project_id, list).await?;
+
+    let task = match client.get_task(&resolved.project_id, &task_id).await {
+        Ok(task) => task,
+        Err(_) if resolved.from_cache && !explicit_scope => {
+            forget_task_project_id(cache.as_ref(), &task_id);
+            resolved =
+                resolve_task_project_id(&client, cache.as_ref(), &task_id, None, None).await?;
+            client.get_task(&resolved.project_id, &task_id).await?
+        }
+        Err(err) => return Err(err),
+    };
+
+    remember_task(cache.as_ref(), &task, Some(&resolved.project_id));
+    print!("{}", format_task_info_output(&task, output)?);
+
     Ok(())
 }
 
@@ -710,6 +755,116 @@ fn format_task_update_output(task: &Task, format: OutputFormat) -> Result<String
     match format {
         OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(task)?)),
         OutputFormat::Human => Ok(format!("Task updated: {}\n", task.title)),
+    }
+}
+
+fn format_task_info_output(task: &Task, format: OutputFormat) -> Result<String> {
+    match format {
+        OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(task)?)),
+        OutputFormat::Human => Ok(format_task_info_human(task)),
+    }
+}
+
+fn format_task_info_human(task: &Task) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("Task: {}\n", task.title));
+    push_optional_line(&mut output, "ID", task.id.as_deref());
+    push_optional_line(&mut output, "Project ID", task.project_id.as_deref());
+    output.push_str(&format!("Status: {}\n", task_status_label(task.status)));
+    output.push_str(&format!(
+        "Priority: {}\n",
+        task_priority_label(task.priority.unwrap_or(0))
+    ));
+    push_optional_line(&mut output, "Start", task.start_date.as_deref());
+    push_optional_line(&mut output, "Due", task.due_date.as_deref());
+    if let Some(is_all_day) = task.is_all_day {
+        output.push_str(&format!("All day: {}\n", is_all_day));
+    }
+    push_optional_line(&mut output, "Time zone", task.time_zone.as_deref());
+    push_optional_line(
+        &mut output,
+        "Tags",
+        task.tags.as_ref().map(|tags| tags.join(", ")),
+    );
+    push_optional_line(
+        &mut output,
+        "Reminders",
+        task.reminders
+            .as_ref()
+            .map(|reminders| reminders.join(", ")),
+    );
+    push_optional_line(&mut output, "Repeat", task.repeat_flag.as_deref());
+    if let Some(sort_order) = task.sort_order {
+        output.push_str(&format!("Sort order: {}\n", sort_order));
+    }
+    push_optional_line(&mut output, "Kind", task.kind.as_deref());
+    push_optional_line(&mut output, "Completed", task.completed_time.as_deref());
+
+    if let Some(content) = task
+        .content
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        output.push_str("Content:\n");
+        output.push_str(content);
+        output.push('\n');
+    }
+    if let Some(desc) = task
+        .desc
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| Some(*value) != task.content.as_deref())
+    {
+        output.push_str("Description:\n");
+        output.push_str(desc);
+        output.push('\n');
+    }
+    if let Some(items) = task.items.as_ref().filter(|items| !items.is_empty()) {
+        output.push_str("Checklist:\n");
+        for item in items {
+            let marker = if matches!(item.status, Some(TaskStatus::Completed)) {
+                "x"
+            } else {
+                " "
+            };
+            output.push_str(&format!(
+                "- [{}] {}\n",
+                marker,
+                item.title.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+
+    output
+}
+
+fn push_optional_line<T>(output: &mut String, label: &str, value: Option<T>)
+where
+    T: AsRef<str>,
+{
+    let Some(value) = value else {
+        return;
+    };
+    let value = value.as_ref();
+    if !value.trim().is_empty() {
+        output.push_str(&format!("{}: {}\n", label, value));
+    }
+}
+
+fn task_status_label(status: Option<TaskStatus>) -> &'static str {
+    match status {
+        Some(TaskStatus::Completed) => "completed",
+        Some(TaskStatus::Normal) | None => "open",
+    }
+}
+
+fn task_priority_label(priority: i32) -> String {
+    match priority {
+        0 => "none".to_string(),
+        1 => "low".to_string(),
+        3 => "medium".to_string(),
+        5 => "high".to_string(),
+        value => value.to_string(),
     }
 }
 

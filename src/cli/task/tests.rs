@@ -253,6 +253,37 @@ fn format_task_mutation_outputs_match_selected_mode() {
 }
 
 #[test]
+fn format_task_info_output_includes_detail_fields() {
+    let task = Task {
+        id: Some("task-1".to_string()),
+        project_id: Some("project-1".to_string()),
+        title: "Write release notes".to_string(),
+        content: Some("Explain the user-facing changes.".to_string()),
+        due_date: Some("2026-03-08T09:00:00Z".to_string()),
+        priority: Some(5),
+        tags: Some(vec!["release".to_string(), "docs".to_string()]),
+        items: Some(vec![crate::models::ChecklistItem {
+            title: Some("Draft changelog".to_string()),
+            status: Some(TaskStatus::Completed),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+
+    let human = format_task_info_output(&task, OutputFormat::Human).unwrap();
+    assert!(human.contains("Task: Write release notes"));
+    assert!(human.contains("ID: task-1"));
+    assert!(human.contains("Priority: high"));
+    assert!(human.contains("Tags: release, docs"));
+    assert!(human.contains("Content:\nExplain the user-facing changes."));
+    assert!(human.contains("- [x] Draft changelog"));
+
+    let json = format_task_info_output(&task, OutputFormat::Json).unwrap();
+    assert!(json.contains("\"title\": \"Write release notes\""));
+    assert!(json.contains("\"projectId\": \"project-1\""));
+}
+
+#[test]
 fn extracts_due_date_today_and_cleans_title() {
     let today = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
     let (title, date) = extract_due_date_from_input("finish report today", today);
