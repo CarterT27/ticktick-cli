@@ -5,6 +5,8 @@ use chrono::{
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskWhenFilter {
+    #[value(alias = "late")]
+    Overdue,
     Today,
     Tomorrow,
     #[value(alias = "thisweek", alias = "this-week", alias = "week")]
@@ -342,6 +344,7 @@ pub(super) fn task_due_date(task: &Task) -> Option<NaiveDate> {
 
 pub(super) fn date_window_for(when: TaskWhenFilter, today: NaiveDate) -> (NaiveDate, NaiveDate) {
     match when {
+        TaskWhenFilter::Overdue => (NaiveDate::MIN, today - Duration::days(1)),
         TaskWhenFilter::Today => (today, today),
         TaskWhenFilter::Tomorrow => {
             let day = today + Duration::days(1);
@@ -363,6 +366,10 @@ pub(super) fn task_matches_when_filter(
     let Some(task_date) = task_due_date(task) else {
         return false;
     };
+
+    if matches!(when, TaskWhenFilter::Today) {
+        return task_date <= today;
+    }
 
     let (start, end) = date_window_for(when, today);
     task_date >= start && task_date <= end

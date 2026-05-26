@@ -78,6 +78,8 @@ fn rejects_invalid_task_status_values() {
 
 #[test]
 fn parses_when_tokens() {
+    assert_eq!(parse_when_token("overdue"), Some(TaskWhenFilter::Overdue));
+    assert_eq!(parse_when_token("late"), Some(TaskWhenFilter::Overdue));
     assert_eq!(parse_when_token("today"), Some(TaskWhenFilter::Today));
     assert_eq!(parse_when_token("tomorrow"), Some(TaskWhenFilter::Tomorrow));
     assert_eq!(parse_when_token("week"), Some(TaskWhenFilter::ThisWeek));
@@ -530,6 +532,13 @@ fn parses_task_date_from_epoch_values() {
 #[test]
 fn computes_date_windows() {
     let base = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+    assert_eq!(
+        date_window_for(TaskWhenFilter::Overdue, base),
+        (
+            NaiveDate::MIN,
+            NaiveDate::from_ymd_opt(2026, 2, 19).unwrap()
+        )
+    );
     assert_eq!(date_window_for(TaskWhenFilter::Today, base), (base, base));
     assert_eq!(
         date_window_for(TaskWhenFilter::Tomorrow, base),
@@ -550,12 +559,28 @@ fn computes_date_windows() {
 #[test]
 fn filters_tasks_for_when() {
     let base = NaiveDate::from_ymd_opt(2026, 2, 20).unwrap();
+    let overdue = make_task(Some("2026-02-19"), None, None, None);
     let today = make_task(Some("2026-02-20"), None, None, None);
     let tomorrow = make_task(Some("2026-02-21"), None, None, None);
     let this_week = make_task(Some("2026-02-22"), None, None, None);
     let next_week = make_task(Some("2026-02-23"), None, None, None);
     let no_date = make_task(None, None, None, None);
 
+    assert!(task_matches_when_filter(
+        &overdue,
+        TaskWhenFilter::Overdue,
+        base
+    ));
+    assert!(!task_matches_when_filter(
+        &today,
+        TaskWhenFilter::Overdue,
+        base
+    ));
+    assert!(task_matches_when_filter(
+        &overdue,
+        TaskWhenFilter::Today,
+        base
+    ));
     assert!(task_matches_when_filter(
         &today,
         TaskWhenFilter::Today,

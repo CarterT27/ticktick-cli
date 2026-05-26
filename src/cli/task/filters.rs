@@ -50,6 +50,7 @@ pub(super) fn parse_task_status_value(value: &str) -> std::result::Result<TaskSt
 
 pub(super) fn parse_when_token(token: &str) -> Option<TaskWhenFilter> {
     match token.to_ascii_lowercase().as_str() {
+        "overdue" | "late" => Some(TaskWhenFilter::Overdue),
         "today" => Some(TaskWhenFilter::Today),
         "tomorrow" => Some(TaskWhenFilter::Tomorrow),
         "week" | "thisweek" | "this-week" => Some(TaskWhenFilter::ThisWeek),
